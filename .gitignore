@@ -1,0 +1,55 @@
+# .NET build outputs
+bin/
+obj/
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+publish/
+dist/
+artifacts/
+
+# Visual Studio / Rider user state
+.vs/
+.idea/
+*.user
+*.userosscache
+*.suo
+*.rsuser
+*.sln.docstates
+*.ncrunch*
+*.DotSettings.user
+
+# NuGet and package caches
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+
+# Logs, diagnostics and crash dumps
+*.log
+*.tlog
+*.binlog
+*.dmp
+
+# Python helper caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local secrets / environment files
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
