@@ -8,8 +8,24 @@ internal static class Program
     [STAThread]
     static void Main()
     {
+        using var singleInstance = new Mutex(
+            initiallyOwned: true,
+            name: @"Local\CodexManager.SingleInstance",
+            createdNew: out var createdNew);
+        if (!createdNew)
+        {
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
-        Application.Run(new TrayApplicationContext());
+        try
+        {
+            Application.Run(new TrayApplicationContext());
+        }
+        finally
+        {
+            singleInstance.ReleaseMutex();
+        }
     }
 }
 
@@ -43,7 +59,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _refreshTimer.Tick += async (_, _) => await RefreshAsync();
         _refreshTimer.Start();
 
-        _service.StateChanged += (_, _) => ApplyState();
+        _service.StateChanged += OnServiceStateChanged;
         ApplyState();
         _ = RefreshAsync();
     }
@@ -51,10 +67,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
     protected override void ExitThreadCore()
     {
         _refreshTimer.Stop();
+        _service.StateChanged -= OnServiceStateChanged;
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _menu.Dispose();
         _widget.Dispose();
+        _service.Dispose();
         base.ExitThreadCore();
     }
 
@@ -94,8 +112,32 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void ApplyState()
     {
+        if (_widget.IsDisposed)
+        {
+            return;
+        }
         var state = _service.BuildDashboardState();
         _widget.ApplyState(state);
         _notifyIcon.Text = _service.BuildTrayTooltip(state);
+    }
+
+    private void OnServiceStateChanged(object? sender, EventArgs e)
+    {
+        if (_widget.IsDisposed)
+        {
+            return;
+        }
+        if (_widget.InvokeRequired)
+        {
+            try
+            {
+                _widget.BeginInvoke(ApplyState);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            return;
+        }
+        ApplyState();
     }
 }

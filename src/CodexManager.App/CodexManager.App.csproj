@@ -5,9 +5,10 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon>..\..\assets\icon.ico</ApplicationIcon>
     <AssemblyName>CodexManager</AssemblyName>
     <RootNamespace>CodexManager</RootNamespace>
+    <Version>2.0.1</Version>
+    <UseAppHost>false</UseAppHost>
     <PublishSingleFile>false</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>

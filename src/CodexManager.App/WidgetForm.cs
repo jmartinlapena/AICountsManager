@@ -22,10 +22,13 @@ internal sealed class WidgetForm : Form
     private readonly Panel _settingsView;
     private readonly Label _settingsSummary;
     private readonly FlowLayoutPanel _settingsAccountList;
+    private readonly CheckBox _strictVerificationToggle;
     private readonly Button _backButton;
     private readonly Label _statusMessage;
     private readonly System.Windows.Forms.Timer _statusTimer;
     private bool _modalDialogOpen;
+    private bool _applyingState;
+    private bool _switchInProgress;
 
     public event EventHandler? HideRequested;
 
@@ -49,6 +52,7 @@ internal sealed class WidgetForm : Form
         _accountCards = new FlowLayoutPanel();
         _settingsSummary = new Label();
         _settingsAccountList = new FlowLayoutPanel();
+        _strictVerificationToggle = new CheckBox();
         _backButton = new ChromeButton();
         _statusMessage = new Label();
         _statusTimer = new System.Windows.Forms.Timer();
@@ -92,22 +96,31 @@ internal sealed class WidgetForm : Form
 
     public void ApplyState(DashboardState state)
     {
-        _accountCards.SuspendLayout();
-        _accountCards.Controls.Clear();
-        foreach (var profile in state.Profiles)
+        _applyingState = true;
+        try
         {
-            _accountCards.Controls.Add(BuildAccountCard(profile));
-        }
-        _accountCards.ResumeLayout();
+            _accountCards.SuspendLayout();
+            _accountCards.Controls.Clear();
+            foreach (var profile in state.Profiles)
+            {
+                _accountCards.Controls.Add(BuildAccountCard(profile));
+            }
+            _accountCards.ResumeLayout();
 
-        _settingsSummary.Text = state.SettingsSummary;
-        _settingsAccountList.SuspendLayout();
-        _settingsAccountList.Controls.Clear();
-        foreach (var profile in state.Profiles)
-        {
-            _settingsAccountList.Controls.Add(BuildSettingsProfileRow(profile));
+            _settingsSummary.Text = state.SettingsSummary;
+            _strictVerificationToggle.Checked = state.StrictVerification;
+            _settingsAccountList.SuspendLayout();
+            _settingsAccountList.Controls.Clear();
+            foreach (var profile in state.Profiles)
+            {
+                _settingsAccountList.Controls.Add(BuildSettingsProfileRow(profile));
+            }
+            _settingsAccountList.ResumeLayout();
         }
-        _settingsAccountList.ResumeLayout();
+        finally
+        {
+            _applyingState = false;
+        }
     }
 
     private Panel BuildMainView()
@@ -191,12 +204,13 @@ internal sealed class WidgetForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             BackColor = CardBackground,
             Padding = new Padding(18, 18, 18, 18),
         };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -218,6 +232,26 @@ internal sealed class WidgetForm : Form
         _settingsSummary.MaximumSize = new Size(320, 0);
         _settingsSummary.AutoSize = true;
         layout.Controls.Add(_settingsSummary);
+
+        _strictVerificationToggle.Text = "Verificar la renovacion antes de abrir Codex";
+        _strictVerificationToggle.Font = new Font("Segoe UI", 9f);
+        _strictVerificationToggle.ForeColor = TextColor;
+        _strictVerificationToggle.BackColor = CardBackground;
+        _strictVerificationToggle.AutoSize = true;
+        _strictVerificationToggle.Margin = new Padding(0, 8, 0, 2);
+        _strictVerificationToggle.CheckedChanged += (_, _) =>
+        {
+            if (_applyingState)
+            {
+                return;
+            }
+            RunAction(
+                () => _service.SetStrictVerification(_strictVerificationToggle.Checked),
+                _strictVerificationToggle.Checked
+                    ? "Verificacion estricta activada."
+                    : "Modo rapido activado.");
+        };
+        layout.Controls.Add(_strictVerificationToggle);
 
         var toolbar = new TableLayoutPanel
         {
@@ -336,7 +370,7 @@ internal sealed class WidgetForm : Form
         }
         else
         {
-            var useButton = BuildMiniActionButton("\uE77B", (_, _) => ConfirmAndSwitchProfile(profile.Name));
+            var useButton = BuildMiniActionButton("\uE77B", async (_, _) => await ConfirmAndSwitchProfileAsync(profile.Name));
             useButton.Location = new Point(310, 10);
             useButton.Size = new Size(34, 24);
             card.Controls.Add(useButton);
@@ -593,15 +627,64 @@ internal sealed class WidgetForm : Form
         _mainView.Visible = true;
     }
 
-    private void ConfirmAndSwitchProfile(string profileName)
+    private async Task ConfirmAndSwitchProfileAsync(string profileName)
     {
-        var message = $"Vas a cambiar a la cuenta '{profileName}'.\n\nAsegúrate de que Codex se encuentra completamente cerrado.";
+        if (_switchInProgress)
+        {
+            ShowStatus("Ya hay un cambio de cuenta en curso.");
+            return;
+        }
+
+        var codexRunning = _service.IsCodexRunning();
+        var message = codexRunning
+            ? $"Vas a cambiar a la cuenta '{profileName}'.\n\nCodex se cerrara normalmente, se preservara la cuenta actual y se volvera a abrir con la nueva."
+            : $"Vas a cambiar a la cuenta '{profileName}'.\n\nLa cuenta actual se preservara antes de instalar la nueva.";
         if (!ShowConfirmationDialog("Cambiar cuenta", message, "Cambiar"))
         {
             return;
         }
 
-        RunAction(() => _service.SwitchToProfile(profileName), "Cuenta activada.");
+        _switchInProgress = true;
+        ShowStatus("Cambiando cuenta...");
+        try
+        {
+            var result = await _service.SwitchToProfileAsync(profileName);
+            ApplyState(_service.BuildDashboardState());
+
+            if (result.Status == SwitchProfileStatus.RequiresReauthentication)
+            {
+                var reauthenticate = ShowConfirmationDialog(
+                    "Sesion caducada",
+                    $"No se pudo renovar '{profileName}'. La cuenta anterior se ha restaurado.\n\nPuedes abrir Codex con '{profileName}' para iniciar sesion de nuevo, o cancelar para seguir con la cuenta anterior.",
+                    "Reautenticar");
+                if (reauthenticate)
+                {
+                    ShowStatus("Preparando reautenticacion...");
+                    var reauthResult = await _service.PrepareReauthenticationAsync(profileName);
+                    ApplyState(_service.BuildDashboardState());
+                    ShowStatus(reauthResult.Message);
+                }
+                else
+                {
+                    ShowStatus("Se mantiene la cuenta anterior.");
+                }
+                return;
+            }
+
+            ShowStatus(result.Message);
+        }
+        catch (OperationCanceledException)
+        {
+            ShowStatus("Cambio cancelado; se ha conservado la cuenta anterior.");
+        }
+        catch (Exception ex)
+        {
+            ShowStatus(ex.Message);
+        }
+        finally
+        {
+            _switchInProgress = false;
+        }
     }
 
     private string? ShowProfileNameDialog(string title, string label, string initialValue)

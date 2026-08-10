@@ -26,8 +26,10 @@ La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrece
 - Clic derecho: muestra la opcion `Salir`.
 - El boton con icono de uso activa un perfil guardado.
 - El boton de refresco actualiza manualmente el uso de la cuenta activa.
-- Antes de cambiar de cuenta, la app muestra una confirmacion propia recordando que hay que cerrar Codex antes.
-- La cuenta activa se refresca automaticamente cada 5 minutos.
+- Si Codex esta abierto, el cambio lo cierra normalmente, espera a que terminen sus procesos, preserva la generacion final de la cuenta saliente, instala la cuenta entrante y vuelve a abrirlo.
+- Si Codex esta cerrado, el cambio suele completarse en menos de un segundo y no inicia procesos salvo que se haya solicitado reautenticacion.
+- Un watcher de `auth.json` guarda inmediatamente las renovaciones de tokens en el perfil que coincide por identidad.
+- Cada 5 minutos solo se actualizan los porcentajes de uso. Esta tarea no copia `auth.json`, no guarda perfiles y no crea backups.
 - Las cuentas no activas muestran el ultimo dato cacheado.
 - El tooltip de la bandeja muestra el perfil activo y el porcentaje restante de la ventana de sesion cuando hay datos.
 
@@ -35,6 +37,7 @@ La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrece
 
 - `Add current account` guarda la cuenta activa actual como perfil.
 - Cada fila en `Settings` permite renombrar o eliminar un perfil.
+- `Verificar la renovacion antes de abrir Codex` activa el modo estricto. Este llama temporalmente a `account/read` con `refreshToken: true`; el modo rapido difiere esa comprobacion hasta que Codex se abra.
 - `Open data folder` abre la carpeta de datos local de la aplicacion.
 - La app puede crear un acceso directo de inicio en Windows para arrancar con la sesion del usuario.
 - Si `CODEX_HOME` no esta definido, se usa `%USERPROFILE%\\.codex`.
@@ -46,6 +49,7 @@ La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrece
 - Cache: `%APPDATA%\\CodexAccountTrayManager\\cache\\usage_cache.json`
 - Config app: `%APPDATA%\\CodexAccountTrayManager\\config\\app_config.json`
 - Logs: `%APPDATA%\\CodexAccountTrayManager\\logs\\app.log`
+- Diario transaccional sin secretos: `%APPDATA%\\CodexAccountTrayManager\\transactions\\current.json`
 - Config Codex: `%USERPROFILE%\\.codex\\config.toml`, o `CODEX_HOME\\config.toml` si `CODEX_HOME` esta definido.
 - Auth activo: `%USERPROFILE%\\.codex\\auth.json`, o `CODEX_HOME\\auth.json` si `CODEX_HOME` esta definido.
 
@@ -53,10 +57,23 @@ La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrece
 
 - No guarda contrasenas.
 - No muestra el contenido de `auth.json`.
+- No registra tokens: los logs y el diario usan solamente huellas SHA-256 abreviadas o completas.
 - No implementa OAuth propio.
+- Nunca ejecuta `logout`, porque esa operacion puede revocar credenciales.
 - No rota cuentas automaticamente.
 - No cambia de cuenta al llegar a un limite.
 - No sube datos fuera de la maquina.
+- Las escrituras de credenciales son atomicas: temporal en el mismo directorio, `Flush(true)`, permisos restringidos, `File.Replace` y lectura de verificacion.
+- Un mutex global serializa todas las operaciones de credenciales. Una generacion con `last_refresh` anterior nunca sustituye a otra mas nueva.
+- Los backups nuevos solo se crean al eliminar explicitamente un perfil y se deduplican por huella. No se crean backups al observar una renovacion ni al consultar porcentajes.
+
+## Identidad y recuperacion
+
+La asociacion entre el `auth.json` activo y un perfil se realiza con los identificadores presentes en los tokens (`chatgpt_user_id`/`sub`, `account_id` y workspace). `ActiveProfile` solo se usa para resolver duplicados que ya coinciden en identidad; nunca basta por si mismo para sobrescribir credenciales.
+
+Si una verificacion estricta devuelve `refresh_token_invalidated`, la aplicacion restaura la cuenta saliente y ofrece preparar la cuenta de destino para reautenticacion. Tras un login correcto, el watcher captura el nuevo `auth.json` sin esperar al temporizador de consumo.
+
+El diario transaccional no contiene tokens y permite reconciliar un cambio interrumpido. Si la identidad activa no pertenece a ningun perfil guardado, CodexManager no la sobrescribe: exige guardarla primero.
 
 ## Desarrollo
 
@@ -80,6 +97,12 @@ Tambien puedes usar:
 python run.py
 ```
 
+Pruebas de regresion (usan exclusivamente credenciales ficticias y directorios temporales):
+
+```powershell
+dotnet run --project src\CodexManager.Tests\CodexManager.Tests.csproj
+```
+
 ## Build
 
 ```cmd
@@ -88,19 +111,24 @@ scripts\build_exe.cmd
 
 Salida esperada:
 
-- `dist\CodexManager\CodexManager.exe`
+- `dist\CodexManager\CodexManager.lnk`
+- `dist\CodexManager\CodexManager.dll`
 
 Alternativa directa, sin scripts:
 
 ```powershell
 dotnet publish src\CodexManager.App\CodexManager.App.csproj -c Release -r win-x64 --self-contained false -o dist\CodexManager
+dotnet dist\CodexManager\CodexManager.dll
 ```
 
-Si `dist\CodexManager` no se puede limpiar porque el ejecutable esta abierto, los scripts intentan publicar en `dist\CodexManager.new`.
+Si `dist\CodexManager` no se puede limpiar porque la aplicacion esta abierta, los scripts publican en `dist\CodexManager.new`.
 
 ## Notas
 
 - Si `codex` no se detecta automaticamente, puedes definir `CODEX_BINARY` con la ruta completa al ejecutable.
 - La deteccion tambien comprueba `PATH`, `where codex`, `%LOCALAPPDATA%\\OpenAI\\Codex\\bin\\codex.exe` y paquetes `OpenAI.Codex_*` en WindowsApps.
-- El refresco de uso consulta `https://chatgpt.com/backend-api/wham/usage` o la base definida en `config.toml`.
-- Para equipos con antivirus estricto, lo mas neutro es mover el codigo fuente y compilar localmente con `dotnet publish`. Eso evita distribuir un `.exe` ya generado. Compilar localmente no sustituye una firma de codigo real, pero suele reducir falsos positivos frente a binarios precompilados descargados.
+- La consulta de uso prefiere `account/rateLimits/read` cuando el modo estricto esta activo y Codex esta cerrado; en los demas casos usa `https://chatgpt.com/backend-api/wham/usage` o la base definida en `config.toml`.
+- Las ventanas se clasifican por `windowDurationMins`: 300 minutos para la sesion de cinco horas y 10.080 minutos para la semanal.
+- Un 401/403 al consultar consumo solo indica que el `access_token` no fue aceptado; no se interpreta como prueba de que el `refresh_token` haya sido revocado.
+- El empaquetado no genera un `apphost` sin firma. El acceso directo ejecuta `CodexManager.dll` mediante el `dotnet.exe` firmado instalado en el equipo, evitando el falso positivo observado con Panda Security sin desactivar protecciones ni crear exclusiones.
+- Para distribuir un `.exe` independiente de forma profesional haria falta firmarlo con un certificado de firma de codigo confiable o autorizarlo expresamente en la herramienta de seguridad.

@@ -1,227 +1,736 @@
 using System.Diagnostics;
-using System.Net.Http.Headers;
-using System.Security.Cryptography;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace CodexManager;
 
-internal sealed class CodexManagerService
+internal sealed class CodexManagerService : IDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly AppPaths _paths;
-    private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private readonly ProfileRepository _profiles;
+    private readonly ICodexProcessController _processController;
+    private readonly ICodexAppServerClient _appServer;
+    private readonly IUsageClient _usageClient;
+    private readonly SemaphoreSlim _credentialGate = new(1, 1);
+    private readonly SemaphoreSlim _switchGate = new(1, 1);
+    private readonly SemaphoreSlim _usageGate = new(1, 1);
+    private readonly AuthFileWatcher? _authWatcher;
+    private bool _disposed;
 
     public event EventHandler? StateChanged;
 
     public CodexManagerService()
+        : this(AppPaths.Build(), null, null, null, startWatcher: true)
     {
-        _paths = AppPaths.Build();
+    }
+
+    internal CodexManagerService(
+        AppPaths paths,
+        ICodexProcessController? processController,
+        ICodexAppServerClient? appServer,
+        IUsageClient? usageClient,
+        bool startWatcher)
+    {
+        _paths = paths;
         _paths.EnsureDirectories();
-        Log("CodexManager iniciado.");
+        _profiles = new ProfileRepository(paths, Log);
+        _processController = processController ?? new CodexProcessController();
+        _appServer = appServer ?? new CodexAppServerClient(paths);
+        _usageClient = usageClient ?? new UsageClient();
+
+        try
+        {
+            _profiles.RecoverJournalAsync().GetAwaiter().GetResult();
+            ReconcileActiveAuthAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Log("La reconciliacion inicial no se pudo completar; no se modificaron credenciales.", ex);
+        }
+
+        if (startWatcher)
+        {
+            _authWatcher = new AuthFileWatcher(_paths.ActiveAuthPath, ReconcileActiveAuthAsync, Log);
+            _authWatcher.ScheduleInitialReconciliation();
+        }
+        Log("CodexManager iniciado con sincronizacion por eventos.", null);
     }
 
     public DashboardState BuildDashboardState()
     {
-        var profiles = ListProfiles();
-        var activeProfile = DetectActiveProfile();
-        var activeUsage = activeProfile is null ? UsageRecord.Empty() : GetUsage(activeProfile.Name);
-        var activeView = BuildProfileState(activeProfile, activeUsage, true);
+        var profiles = _profiles.ListProfiles();
+        var config = _profiles.LoadAppConfig();
+        var activeMeta = profiles.FirstOrDefault(profile =>
+            string.Equals(profile.Name, config.ActiveProfile, StringComparison.OrdinalIgnoreCase));
+        var usageCache = _profiles.LoadUsageCache();
+        var activeUsage = activeMeta is null
+            ? UsageRecord.Empty()
+            : GetUsage(usageCache, activeMeta.Name);
         var profileViews = profiles
-            .Select(profile => BuildProfileState(profile, GetUsage(profile.Name), profile.Name.Equals(activeProfile?.Name, StringComparison.OrdinalIgnoreCase)))
+            .Select(profile => BuildProfileState(
+                profile,
+                GetUsage(usageCache, profile.Name),
+                string.Equals(profile.Name, activeMeta?.Name, StringComparison.OrdinalIgnoreCase)))
             .ToList();
-        var codexStatus = DetectCodexBinary();
+        var binary = CodexBinaryLocator.Find();
+        var runtime = _processController.CaptureState();
+        var settings = binary is null
+            ? "Codex no encontrado. Define CODEX_BINARY."
+            : $"Watcher activo · Verificacion estricta: {(config.StrictVerification ? "si" : "no")}";
 
         return new DashboardState(
-            ActiveProfile: activeView,
+            ActiveProfile: BuildProfileState(activeMeta, activeUsage, activeMeta is not null),
             Profiles: profileViews,
-            SettingsSummary: $"Codex: {codexStatus.Message}",
+            SettingsSummary: settings,
             DataFolder: _paths.AppHome,
-            LogsFolder: _paths.LogsDir);
+            LogsFolder: _paths.LogsDir,
+            StrictVerification: config.StrictVerification,
+            CodexRunning: runtime.IsRunning);
     }
 
     public string BuildTrayTooltip(DashboardState state)
     {
         var active = state.ActiveProfile;
-        var session = active.SessionRemainingPercent.HasValue ? $"{active.SessionRemainingPercent.Value:0}% restante" : "sin datos";
+        var session = active.SessionRemainingPercent.HasValue
+            ? $"{active.SessionRemainingPercent.Value:0}% restante"
+            : "sin datos";
         var text = $"CodexManager - {active.Name} - {session}";
         return text.Length <= 63 ? text : text[..63];
     }
 
-    public async Task RefreshActiveProfileAsync()
+    public bool IsCodexRunning() => _processController.CaptureState().IsRunning;
+
+    public bool StrictVerificationEnabled() => _profiles.LoadAppConfig().StrictVerification;
+
+    public void SetStrictVerification(bool enabled)
     {
-        if (!await _refreshLock.WaitAsync(0))
+        var config = _profiles.LoadAppConfig();
+        _profiles.SaveAppConfig(config with
+        {
+            StrictVerification = enabled,
+            LastUpdatedAt = UtcNow(),
+        });
+        NotifyStateChanged();
+    }
+
+    public async Task RefreshActiveProfileAsync(CancellationToken cancellationToken = default)
+    {
+        if (!await _usageGate.WaitAsync(0, cancellationToken))
         {
             return;
         }
 
         try
         {
-            var active = DetectActiveProfile();
-            if (active is null)
+            var config = _profiles.LoadAppConfig();
+            if (string.IsNullOrWhiteSpace(config.ActiveProfile))
             {
-                Log("Refresh omitido: no hay perfil activo.");
                 return;
             }
-
             if (!File.Exists(_paths.ActiveAuthPath))
             {
-                SaveUsage(active.Name, UsageRecord.FromError("No existe auth.json activo."));
+                _profiles.SaveUsage(config.ActiveProfile, UsageRecord.FromError("No existe auth.json activo."));
                 NotifyStateChanged();
                 return;
             }
 
-            var snapshot = await ReadUsageSnapshotAsync();
-            SaveUsage(active.Name, snapshot);
-            if (!string.IsNullOrWhiteSpace(snapshot.Email))
+            var live = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken);
+            var stored = await _profiles.LoadProfileSnapshotAsync(config.ActiveProfile, cancellationToken);
+            if (!live.Identity.Matches(stored.Identity))
             {
-                UpdateProfileMeta(active.Name, meta => meta with { Email = snapshot.Email, UpdatedAt = UtcNow() });
+                _profiles.SaveUsage(
+                    config.ActiveProfile,
+                    UsageRecord.FromError("La identidad activa ya no coincide con el perfil seleccionado."));
+                NotifyStateChanged();
+                return;
             }
-            SaveActiveBackToProfile();
+
+            UsageRecord usage;
+            if (config.StrictVerification && !_processController.CaptureState().IsRunning)
+            {
+                try
+                {
+                    usage = await _appServer.ReadRateLimitsAsync(cancellationToken);
+                }
+                catch
+                {
+                    usage = await _usageClient.ReadAsync(live, _paths.CodexConfigPath, cancellationToken);
+                }
+            }
+            else
+            {
+                usage = await _usageClient.ReadAsync(live, _paths.CodexConfigPath, cancellationToken);
+            }
+
+            _profiles.SaveUsage(config.ActiveProfile, usage);
             NotifyStateChanged();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            var active = DetectActiveProfile();
-            if (active is not null)
+            var active = _profiles.LoadAppConfig().ActiveProfile;
+            if (!string.IsNullOrWhiteSpace(active))
             {
-                SaveUsage(active.Name, UsageRecord.FromError(ex.Message));
+                _profiles.SaveUsage(active, UsageRecord.FromError(ex.Message));
             }
-            Log("Error refrescando cuenta activa.", ex);
+            Log("Error actualizando porcentajes. Las credenciales no se han modificado.", ex);
             NotifyStateChanged();
         }
         finally
         {
-            _refreshLock.Release();
+            _usageGate.Release();
         }
     }
 
     public void AddCurrentProfile(string profileName)
     {
-        profileName = SanitizeProfileName(profileName);
-        if (!File.Exists(_paths.ActiveAuthPath))
+        ThrowIfDisposed();
+        _credentialGate.Wait();
+        try
         {
-            throw new InvalidOperationException("No existe auth.json activo en CODEX_HOME.");
+            using var globalLock = new GlobalAuthSwitchLock(_paths.CodexHome);
+            globalLock.AcquireAsync(TimeSpan.FromSeconds(5), CancellationToken.None).GetAwaiter().GetResult();
+            if (!File.Exists(_paths.ActiveAuthPath))
+            {
+                throw new InvalidOperationException("No existe auth.json activo en CODEX_HOME.");
+            }
+
+            var snapshot = StableAuthFile.ReadAsync(_paths.ActiveAuthPath).GetAwaiter().GetResult();
+            _profiles.AddOrUpdateFromSnapshot(profileName, snapshot);
+            Log($"Perfil '{profileName}' guardado para identidad {AuthHash.Short(snapshot.Identity.Fingerprint)}.", null);
         }
-
-        var profileDir = GetProfileDir(profileName);
-        Directory.CreateDirectory(profileDir);
-        var authTarget = Path.Combine(profileDir, "auth.json");
-        BackupIfExists(authTarget, $"profile-{profileName}");
-        File.Copy(_paths.ActiveAuthPath, authTarget, true);
-
-        var meta = new ProfileMeta(profileName, UtcNow(), UtcNow(), _paths.CodexHome, null);
-        SaveMeta(profileName, meta);
-        SaveAppConfig(new AppConfig(profileName, UtcNow()));
+        finally
+        {
+            _credentialGate.Release();
+        }
         NotifyStateChanged();
     }
 
     public void RenameProfile(string currentName, string newName)
     {
-        currentName = SanitizeProfileName(currentName);
-        newName = SanitizeProfileName(newName);
-        var currentDir = GetProfileDir(currentName);
-        var newDir = GetProfileDir(newName);
-        if (!Directory.Exists(currentDir))
+        ThrowIfDisposed();
+        _credentialGate.Wait();
+        try
         {
-            throw new InvalidOperationException("El perfil no existe.");
+            using var globalLock = new GlobalAuthSwitchLock(_paths.CodexHome);
+            globalLock.AcquireAsync(TimeSpan.FromSeconds(5), CancellationToken.None).GetAwaiter().GetResult();
+            _profiles.Rename(currentName, newName);
         }
-        if (Directory.Exists(newDir))
+        finally
         {
-            throw new InvalidOperationException("Ya existe un perfil con ese nombre.");
-        }
-        Directory.Move(currentDir, newDir);
-        SaveMeta(newName, LoadMeta(newName) with { Name = newName, UpdatedAt = UtcNow() });
-
-        var appConfig = LoadAppConfig();
-        if (string.Equals(appConfig.ActiveProfile, currentName, StringComparison.OrdinalIgnoreCase))
-        {
-            SaveAppConfig(appConfig with { ActiveProfile = newName });
-        }
-
-        var cache = LoadUsageCache();
-        if (cache.Accounts.Remove(currentName, out var usage))
-        {
-            cache.Accounts[newName] = usage;
-            SaveUsageCache(cache);
+            _credentialGate.Release();
         }
         NotifyStateChanged();
     }
 
     public void DeleteProfile(string profileName)
     {
-        profileName = SanitizeProfileName(profileName);
-        var profileDir = GetProfileDir(profileName);
-        if (!Directory.Exists(profileDir))
-        {
-            return;
-        }
-        BackupIfExists(Path.Combine(profileDir, "auth.json"), $"deleted-{profileName}");
-        Directory.Delete(profileDir, true);
-
-        var cache = LoadUsageCache();
-        cache.Accounts.Remove(profileName);
-        SaveUsageCache(cache);
-
-        var config = LoadAppConfig();
+        ThrowIfDisposed();
+        var config = _profiles.LoadAppConfig();
         if (string.Equals(config.ActiveProfile, profileName, StringComparison.OrdinalIgnoreCase))
         {
-            SaveAppConfig(config with { ActiveProfile = null });
+            throw new InvalidOperationException("No se puede eliminar el perfil activo. Cambia primero a otra cuenta.");
         }
-        NotifyStateChanged();
-    }
 
-    public void SwitchToProfile(string profileName)
-    {
-        profileName = SanitizeProfileName(profileName);
-        var source = Path.Combine(GetProfileDir(profileName), "auth.json");
-        if (!File.Exists(source))
+        _credentialGate.Wait();
+        try
         {
-            throw new InvalidOperationException("El perfil no tiene auth.json.");
+            using var globalLock = new GlobalAuthSwitchLock(_paths.CodexHome);
+            globalLock.AcquireAsync(TimeSpan.FromSeconds(5), CancellationToken.None).GetAwaiter().GetResult();
+            _profiles.Delete(profileName);
         }
-        BackupIfExists(_paths.ActiveAuthPath, "active-auth");
-        Directory.CreateDirectory(_paths.CodexHome);
-        File.Copy(source, _paths.ActiveAuthPath, true);
-        SaveAppConfig(new AppConfig(profileName, UtcNow()));
+        finally
+        {
+            _credentialGate.Release();
+        }
         NotifyStateChanged();
     }
 
-    public void SaveActiveBackToProfile()
+    public Task<SwitchProfileResult> SwitchToProfileAsync(
+        string profileName,
+        CancellationToken cancellationToken = default) =>
+        SwitchToProfileCoreAsync(profileName, skipStrictVerification: false, cancellationToken);
+
+    public Task<SwitchProfileResult> PrepareReauthenticationAsync(
+        string profileName,
+        CancellationToken cancellationToken = default) =>
+        SwitchToProfileCoreAsync(profileName, skipStrictVerification: true, cancellationToken);
+
+    private async Task<SwitchProfileResult> SwitchToProfileCoreAsync(
+        string profileName,
+        bool skipStrictVerification,
+        CancellationToken cancellationToken)
     {
-        var config = LoadAppConfig();
-        if (string.IsNullOrWhiteSpace(config.ActiveProfile))
+        ThrowIfDisposed();
+        profileName = _profiles.SanitizeProfileName(profileName);
+        await _switchGate.WaitAsync(cancellationToken);
+        var usageGateHeld = false;
+        var initialRuntime = new CodexRuntimeState(false, null, []);
+        var previousProfile = _profiles.LoadAppConfig().ActiveProfile;
+        var shouldRestart = skipStrictVerification;
+        var codexClosedByUs = false;
+        AuthSnapshot? outgoingForRollback = null;
+        ProfileAuthMatch? outgoingMatchForRollback = null;
+        var targetWasInstalled = false;
+
+        try
+        {
+            // A rate-limit query may own a short-lived app-server process. Wait
+            // for it and prevent another query from starting during the switch.
+            await _usageGate.WaitAsync(cancellationToken);
+            usageGateHeld = true;
+            initialRuntime = _processController.CaptureState();
+            shouldRestart = initialRuntime.IsRunning || skipStrictVerification;
+
+            // Validate both sides before closing Codex. A corrupt target or an
+            // unsaved live account must never interrupt the current session.
+            await _credentialGate.WaitAsync(cancellationToken);
+            try
+            {
+                using var preflightLock = new GlobalAuthSwitchLock(_paths.CodexHome);
+                await preflightLock.AcquireAsync(TimeSpan.FromSeconds(10), cancellationToken);
+                var preflightTarget = await _profiles.LoadProfileSnapshotAsync(profileName, cancellationToken);
+                if (!preflightTarget.Identity.IsUsable)
+                {
+                    return new SwitchProfileResult(
+                        SwitchProfileStatus.Failed,
+                        $"El perfil '{profileName}' no contiene una identidad verificable.",
+                        previousProfile,
+                        profileName);
+                }
+
+                if (File.Exists(_paths.ActiveAuthPath))
+                {
+                    var preflightOutgoing = await StableAuthFile.ReadAsync(
+                        _paths.ActiveAuthPath,
+                        cancellationToken: cancellationToken);
+                    var preflightMatch = await _profiles.FindByIdentityAsync(preflightOutgoing, cancellationToken);
+                    if (preflightMatch is null)
+                    {
+                        return new SwitchProfileResult(
+                            SwitchProfileStatus.Failed,
+                            "La cuenta activa no esta guardada como perfil. Guardala antes de cambiar para no perder el inicio de sesion.",
+                            previousProfile,
+                            profileName);
+                    }
+                }
+            }
+            finally
+            {
+                _credentialGate.Release();
+            }
+
+            if (initialRuntime.IsRunning)
+            {
+                var closed = await _processController.CloseNormallyAsync(TimeSpan.FromSeconds(45), cancellationToken);
+                if (!closed)
+                {
+                    return new SwitchProfileResult(
+                        SwitchProfileStatus.CodexStillRunning,
+                        "Codex sigue abierto. Termina o cancela la operacion activa, cierralo y vuelve a intentarlo.",
+                        previousProfile,
+                        profileName);
+                }
+                codexClosedByUs = true;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(850), cancellationToken);
+            AuthSnapshot targetIdentityForRestart;
+
+            await _credentialGate.WaitAsync(cancellationToken);
+            try
+            {
+                using var globalLock = new GlobalAuthSwitchLock(_paths.CodexHome);
+                await globalLock.AcquireAsync(TimeSpan.FromSeconds(10), cancellationToken);
+
+                var target = await _profiles.LoadProfileSnapshotAsync(profileName, cancellationToken);
+                if (!target.Identity.IsUsable)
+                {
+                    throw new InvalidOperationException($"El perfil '{profileName}' no contiene una identidad verificable.");
+                }
+
+                if (File.Exists(_paths.ActiveAuthPath))
+                {
+                    outgoingForRollback = await StableAuthFile.ReadAsync(
+                        _paths.ActiveAuthPath,
+                        cancellationToken: cancellationToken);
+                    outgoingMatchForRollback = await _profiles.FindByIdentityAsync(
+                        outgoingForRollback,
+                        cancellationToken);
+                    if (outgoingMatchForRollback is null)
+                    {
+                        if (codexClosedByUs)
+                        {
+                            await _processController.RestartAsync(
+                                initialRuntime.DesktopExecutablePath,
+                                TimeSpan.FromSeconds(15),
+                                CancellationToken.None);
+                            codexClosedByUs = false;
+                        }
+                        return new SwitchProfileResult(
+                            SwitchProfileStatus.Failed,
+                            "La cuenta activa no esta guardada como perfil. Guardala antes de cambiar para no perder el inicio de sesion.",
+                            previousProfile,
+                            profileName);
+                    }
+                    await _profiles.SaveIfNewerAsync(
+                        outgoingMatchForRollback.Name,
+                        outgoingForRollback,
+                        cancellationToken);
+                    await EnsureOutgoingWasPreservedAsync(
+                        outgoingMatchForRollback.Name,
+                        outgoingForRollback,
+                        cancellationToken);
+                    previousProfile = outgoingMatchForRollback.Name;
+                }
+
+                if (outgoingForRollback is not null && outgoingForRollback.Identity.Matches(target.Identity))
+                {
+                    _profiles.SaveAppConfig(_profiles.LoadAppConfig() with
+                    {
+                        ActiveProfile = profileName,
+                        LastUpdatedAt = UtcNow(),
+                    });
+                    targetIdentityForRestart = outgoingForRollback;
+                }
+                else
+                {
+                    var transaction = new CredentialTransaction(
+                        Id: Guid.NewGuid().ToString("N"),
+                        Operation: skipStrictVerification ? "reauthenticate" : "switch",
+                        Stage: "prepared",
+                        SourceProfile: outgoingMatchForRollback?.Name,
+                        TargetProfile: profileName,
+                        SourceAuthFingerprint: outgoingForRollback?.ContentFingerprint,
+                        TargetAuthFingerprint: target.ContentFingerprint,
+                        TargetIdentityFingerprint: target.Identity.Fingerprint,
+                        StartedAt: UtcNow(),
+                        UpdatedAt: UtcNow());
+                    _profiles.WriteJournal(transaction);
+
+                    AtomicFile.WriteBytes(_paths.ActiveAuthPath, target.Bytes);
+                    targetWasInstalled = true;
+                    var installed = await StableAuthFile.ReadAsync(
+                        _paths.ActiveAuthPath,
+                        cancellationToken: cancellationToken);
+                    EnsureInstalledTarget(profileName, target, installed);
+                    transaction = transaction with { Stage = "installed", UpdatedAt = UtcNow() };
+                    _profiles.WriteJournal(transaction);
+
+                    var strict = _profiles.LoadAppConfig().StrictVerification && !skipStrictVerification;
+                    if (strict)
+                    {
+                        var verification = await _appServer.VerifyAsync(forceRefresh: true, cancellationToken);
+                        if (verification.Status != AuthVerificationStatus.Success)
+                        {
+                            await RestoreOutgoingAsync(
+                                outgoingForRollback,
+                                outgoingMatchForRollback,
+                                CancellationToken.None);
+                            targetWasInstalled = false;
+                            _profiles.ClearJournal();
+                            if (shouldRestart)
+                            {
+                                await _processController.RestartAsync(
+                                    initialRuntime.DesktopExecutablePath,
+                                    TimeSpan.FromSeconds(15),
+                                    cancellationToken);
+                            }
+
+                            var status = verification.Status == AuthVerificationStatus.RefreshTokenInvalidated
+                                ? SwitchProfileStatus.RequiresReauthentication
+                                : SwitchProfileStatus.Failed;
+                            return new SwitchProfileResult(
+                                status,
+                                verification.Error ?? "La verificacion estricta no se pudo completar; se restauro la cuenta anterior.",
+                                previousProfile,
+                                profileName,
+                                shouldRestart);
+                        }
+
+                        var refreshed = await StableAuthFile.ReadAsync(
+                            _paths.ActiveAuthPath,
+                            cancellationToken: cancellationToken);
+                        if (!refreshed.Identity.Matches(target.Identity))
+                        {
+                            await RestoreOutgoingAsync(
+                                outgoingForRollback,
+                                outgoingMatchForRollback,
+                                CancellationToken.None);
+                            targetWasInstalled = false;
+                            _profiles.ClearJournal();
+                            throw new InvalidOperationException("La verificacion devolvio una identidad distinta; se restauro la cuenta anterior.");
+                        }
+                        await _profiles.SaveIfNewerAsync(profileName, refreshed, cancellationToken);
+                        target = refreshed;
+                        transaction = transaction with
+                        {
+                            Stage = "verified",
+                            TargetAuthFingerprint = refreshed.ContentFingerprint,
+                            UpdatedAt = UtcNow(),
+                        };
+                        _profiles.WriteJournal(transaction);
+                    }
+
+                    _profiles.SaveAppConfig(_profiles.LoadAppConfig() with
+                    {
+                        ActiveProfile = profileName,
+                        LastUpdatedAt = UtcNow(),
+                    });
+                    _profiles.ClearJournal();
+                    targetWasInstalled = false;
+                    targetIdentityForRestart = target;
+                }
+            }
+            catch
+            {
+                if (targetWasInstalled && outgoingForRollback is not null)
+                {
+                    await RestoreOutgoingAsync(
+                        outgoingForRollback,
+                        outgoingMatchForRollback,
+                        CancellationToken.None);
+                    targetWasInstalled = false;
+                    _profiles.ClearJournal();
+                }
+                throw;
+            }
+            finally
+            {
+                _credentialGate.Release();
+            }
+
+            var restarted = false;
+            if (shouldRestart)
+            {
+                restarted = await _processController.RestartAsync(
+                    initialRuntime.DesktopExecutablePath,
+                    TimeSpan.FromSeconds(15),
+                    cancellationToken);
+                if (!restarted)
+                {
+                    return new SwitchProfileResult(
+                        SwitchProfileStatus.RestartFailed,
+                        "La cuenta se instalo y verifico, pero Codex no pudo reiniciarse automaticamente.",
+                        previousProfile,
+                        profileName);
+                }
+                codexClosedByUs = false;
+
+                await Task.Delay(TimeSpan.FromMilliseconds(900), cancellationToken);
+                var afterRestart = await StableAuthFile.ReadAsync(
+                    _paths.ActiveAuthPath,
+                    cancellationToken: cancellationToken);
+                if (!afterRestart.Identity.Matches(targetIdentityForRestart.Identity))
+                {
+                    return new SwitchProfileResult(
+                        SwitchProfileStatus.Failed,
+                        "Codex se reinicio, pero la identidad activa no coincide con el perfil solicitado.",
+                        previousProfile,
+                        profileName,
+                        true);
+                }
+            }
+
+            Log($"Cambio completado a '{profileName}' ({AuthHash.Short(targetIdentityForRestart.Identity.Fingerprint)}).", null);
+            NotifyStateChanged();
+            _usageGate.Release();
+            usageGateHeld = false;
+            _ = RefreshActiveProfileAsync(CancellationToken.None);
+            return new SwitchProfileResult(
+                SwitchProfileStatus.Success,
+                skipStrictVerification
+                    ? "Cuenta preparada. Completa el inicio de sesion en Codex; el watcher guardara las credenciales nuevas."
+                    : "Cuenta activada y verificada.",
+                previousProfile,
+                profileName,
+                restarted);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await RestartAfterFailedSwitchAsync(initialRuntime, codexClosedByUs);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log($"Fallo cambiando al perfil '{profileName}'.", ex);
+            try
+            {
+                await _profiles.RecoverJournalAsync(cancellationToken);
+            }
+            catch
+            {
+            }
+            await RestartAfterFailedSwitchAsync(initialRuntime, codexClosedByUs);
+            return new SwitchProfileResult(
+                SwitchProfileStatus.Failed,
+                ex.Message,
+                previousProfile,
+                profileName);
+        }
+        finally
+        {
+            if (usageGateHeld)
+            {
+                _usageGate.Release();
+            }
+            _switchGate.Release();
+        }
+    }
+
+    private async Task RestartAfterFailedSwitchAsync(CodexRuntimeState initialRuntime, bool codexClosedByUs)
+    {
+        if (!codexClosedByUs || !initialRuntime.IsRunning || _processController.CaptureState().IsRunning)
         {
             return;
         }
-        if (!File.Exists(_paths.ActiveAuthPath))
+
+        try
         {
-            throw new InvalidOperationException("No existe auth.json activo.");
+            await _processController.RestartAsync(
+                initialRuntime.DesktopExecutablePath,
+                TimeSpan.FromSeconds(15),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            Log("No se pudo reiniciar Codex despues de cancelar o revertir el cambio.", ex);
+        }
+    }
+
+    private async Task RestoreOutgoingAsync(
+        AuthSnapshot? outgoing,
+        ProfileAuthMatch? outgoingMatch,
+        CancellationToken cancellationToken)
+    {
+        if (outgoing is null)
+        {
+            return;
         }
 
-        var target = Path.Combine(GetProfileDir(config.ActiveProfile), "auth.json");
-        Directory.CreateDirectory(GetProfileDir(config.ActiveProfile));
-        BackupIfExists(target, $"profile-{config.ActiveProfile}");
-        File.Copy(_paths.ActiveAuthPath, target, true);
-        UpdateProfileMeta(config.ActiveProfile, meta => meta with { UpdatedAt = UtcNow() });
+        var restore = outgoing;
+        if (outgoingMatch is not null)
+        {
+            var stored = await _profiles.LoadProfileSnapshotAsync(outgoingMatch.Name, cancellationToken);
+            if (stored.Identity.Matches(outgoing.Identity) && stored.CompareGenerationTo(outgoing) > 0)
+            {
+                restore = stored;
+            }
+        }
+
+        AtomicFile.WriteBytes(_paths.ActiveAuthPath, restore.Bytes);
+        var verified = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken);
+        if (!verified.Identity.Matches(restore.Identity))
+        {
+            throw new IOException("No se pudo verificar la restauracion de la cuenta anterior.");
+        }
+        if (outgoingMatch is not null)
+        {
+            _profiles.SaveAppConfig(_profiles.LoadAppConfig() with
+            {
+                ActiveProfile = outgoingMatch.Name,
+                LastUpdatedAt = UtcNow(),
+            });
+        }
+    }
+
+    private async Task EnsureOutgoingWasPreservedAsync(
+        string profileName,
+        AuthSnapshot outgoing,
+        CancellationToken cancellationToken)
+    {
+        var stored = await _profiles.LoadProfileSnapshotAsync(profileName, cancellationToken);
+        if (!stored.Identity.Matches(outgoing.Identity))
+        {
+            throw new InvalidOperationException(
+                $"No se pudo preservar la identidad saliente en el perfil '{profileName}'.");
+        }
+        if (string.Equals(stored.CredentialFingerprint, outgoing.CredentialFingerprint, StringComparison.Ordinal)
+            || stored.CompareGenerationTo(outgoing) > 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"La generacion saliente de '{profileName}' no pudo guardarse con seguridad. No se ha cambiado de cuenta.");
+    }
+
+    private static void EnsureInstalledTarget(string profileName, AuthSnapshot expected, AuthSnapshot installed)
+    {
+        if (!expected.Identity.Matches(installed.Identity)
+            || !string.Equals(expected.ContentFingerprint, installed.ContentFingerprint, StringComparison.Ordinal))
+        {
+            throw new IOException($"La sustitucion atomica de '{profileName}' no supero la verificacion.");
+        }
+    }
+
+    private async Task ReconcileActiveAuthAsync(CancellationToken cancellationToken)
+    {
+        if (_disposed || !File.Exists(_paths.ActiveAuthPath))
+        {
+            return;
+        }
+
+        await _credentialGate.WaitAsync(cancellationToken);
+        try
+        {
+            using var globalLock = new GlobalAuthSwitchLock(_paths.CodexHome);
+            await globalLock.AcquireAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            var live = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken);
+            var match = await _profiles.FindByIdentityAsync(live, cancellationToken);
+            var config = _profiles.LoadAppConfig();
+
+            if (match is null)
+            {
+                if (!string.IsNullOrWhiteSpace(config.ActiveProfile))
+                {
+                    _profiles.SaveAppConfig(config with { ActiveProfile = null, LastUpdatedAt = UtcNow() });
+                }
+                Log(
+                    $"auth.json pertenece a una identidad no guardada ({AuthHash.Short(live.Identity.Fingerprint)}).",
+                    null);
+                NotifyStateChanged();
+                return;
+            }
+
+            var updated = await _profiles.SaveIfNewerAsync(match.Name, live, cancellationToken);
+            if (!string.Equals(config.ActiveProfile, match.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                _profiles.SaveAppConfig(config with
+                {
+                    ActiveProfile = match.Name,
+                    LastUpdatedAt = UtcNow(),
+                });
+            }
+            if (updated)
+            {
+                Log(
+                    $"Watcher guardo una nueva generacion para '{match.Name}' ({AuthHash.Short(live.ContentFingerprint)}).",
+                    null);
+            }
+            NotifyStateChanged();
+        }
+        finally
+        {
+            _credentialGate.Release();
+        }
     }
 
     public void EnsureFileModeConfig()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_paths.CodexConfigPath)!);
-        if (!File.Exists(_paths.CodexConfigPath))
-        {
-            File.WriteAllText(_paths.CodexConfigPath, "cli_auth_credentials_store = \"file\"" + Environment.NewLine);
-            NotifyStateChanged();
-            return;
-        }
-
-        BackupIfExists(_paths.CodexConfigPath, "config");
-        var content = File.ReadAllText(_paths.CodexConfigPath);
+        var content = File.Exists(_paths.CodexConfigPath)
+            ? File.ReadAllText(_paths.CodexConfigPath)
+            : string.Empty;
+        string updated;
         if (Regex.IsMatch(content, @"^\s*cli_auth_credentials_store\s*=", RegexOptions.Multiline))
         {
-            content = Regex.Replace(
+            updated = Regex.Replace(
                 content,
                 @"^\s*cli_auth_credentials_store\s*=.*$",
                 "cli_auth_credentials_store = \"file\"",
@@ -229,9 +738,14 @@ internal sealed class CodexManagerService
         }
         else
         {
-            content = content.TrimEnd() + Environment.NewLine + "cli_auth_credentials_store = \"file\"" + Environment.NewLine;
+            updated = content.TrimEnd() + Environment.NewLine
+                + "cli_auth_credentials_store = \"file\""
+                + Environment.NewLine;
         }
-        File.WriteAllText(_paths.CodexConfigPath, content);
+        if (!string.Equals(content, updated, StringComparison.Ordinal))
+        {
+            AtomicFile.WriteText(_paths.CodexConfigPath, updated);
+        }
         NotifyStateChanged();
     }
 
@@ -252,314 +766,56 @@ internal sealed class CodexManagerService
 
     public void OpenFolder(string path)
     {
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = path,
-            UseShellExecute = true,
-        });
+        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
 
     private void CreateStartupShortcut()
     {
         Directory.CreateDirectory(_paths.StartupFolder);
-        var exePath = Environment.ProcessPath ?? throw new InvalidOperationException("No se pudo resolver el ejecutable.");
+        var executable = Environment.ProcessPath
+            ?? throw new InvalidOperationException("No se pudo resolver el ejecutable.");
+        var entryAssembly = Assembly.GetEntryAssembly()?.Location;
+        var hostedByDotnet = string.Equals(
+            Path.GetFileNameWithoutExtension(executable),
+            "dotnet",
+            StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(entryAssembly);
+        var arguments = hostedByDotnet ? $"\"{entryAssembly}\"" : string.Empty;
         var command = $"""
             $shell = New-Object -ComObject WScript.Shell
             $shortcut = $shell.CreateShortcut('{_paths.StartupShortcutPath.Replace("'", "''")}')
-            $shortcut.TargetPath = '{exePath.Replace("'", "''")}'
+            $shortcut.TargetPath = '{executable.Replace("'", "''")}'
+            $shortcut.Arguments = '{arguments.Replace("'", "''")}'
             $shortcut.WorkingDirectory = '{AppContext.BaseDirectory.Replace("'", "''")}'
             $shortcut.IconLocation = '{Path.Combine(AppContext.BaseDirectory, "assets", "icon.ico").Replace("'", "''")},0'
             $shortcut.Description = 'CodexManager'
+            $shortcut.WindowStyle = 7
             $shortcut.Save()
             """;
-        var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -Command \"{command.Replace("\"", "\\\"")}\"")
+        using var process = Process.Start(new ProcessStartInfo
         {
-            CreateNoWindow = true,
+            FileName = "powershell.exe",
             UseShellExecute = false,
+            CreateNoWindow = true,
+            ArgumentList =
+            {
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            },
         });
         process?.WaitForExit();
     }
 
-    private async Task<UsageRecord> ReadUsageSnapshotAsync()
+    private static UsageRecord GetUsage(UsageCacheFile cache, string profileName) =>
+        cache.Accounts.TryGetValue(profileName, out var usage) ? usage : UsageRecord.Empty();
+
+    private static ProfileState BuildProfileState(ProfileMeta? profile, UsageRecord usage, bool isActive)
     {
-        var creds = LoadCodexCredentials();
-        var baseUrl = ResolveChatGptBaseUrl();
-        var url = $"{baseUrl}/wham/usage";
-
-        using var http = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(30)
-        };
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", creds.AccessToken);
-        request.Headers.UserAgent.ParseAdd("CodexManager");
-        request.Headers.Accept.ParseAdd("application/json");
-        if (!string.IsNullOrWhiteSpace(creds.AccountId))
-        {
-            request.Headers.Add("ChatGPT-Account-Id", creds.AccountId);
-        }
-
-        using var response = await http.SendAsync(request);
-        if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
-        {
-            throw new InvalidOperationException("La sesion de Codex no es valida. Vuelve a iniciar sesion en Codex.");
-        }
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new InvalidOperationException($"Codex usage API devolvio {(int)response.StatusCode}.");
-        }
-
-        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync());
-        return NormalizeUsage(json, json);
-    }
-
-    private CodexBinaryStatus DetectCodexBinary()
-    {
-        foreach (var candidate in EnumerateCodexCandidates())
-        {
-            if (File.Exists(candidate))
-            {
-                return new CodexBinaryStatus(true, candidate, candidate);
-            }
-        }
-        return new CodexBinaryStatus(false, null, "No se encontro codex. Define CODEX_BINARY si hace falta.");
-    }
-
-    private IEnumerable<string> EnumerateCodexCandidates()
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var candidates = new List<string>();
-
-        void Add(string? path)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return;
-            }
-            if (seen.Add(path))
-            {
-                candidates.Add(path);
-            }
-        }
-        Add(Environment.GetEnvironmentVariable("CODEX_BINARY"));
-        Add(FindInPath("codex.exe"));
-        Add(FindInPath("codex"));
-
-        foreach (var path in RunWhereCodex())
-        {
-            Add(path);
-        }
-
-        var localBinary = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "OpenAI", "Codex", "bin", "codex.exe");
-        Add(localBinary);
-
-        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        var windowsApps = Path.Combine(programFiles, "WindowsApps");
-        if (Directory.Exists(windowsApps))
-        {
-            try
-            {
-                foreach (var dir in Directory.GetDirectories(windowsApps, "OpenAI.Codex_*").OrderDescending())
-                {
-                    Add(Path.Combine(dir, "app", "resources", "codex.exe"));
-                }
-            }
-            catch (UnauthorizedAccessException)
-            {
-            }
-            catch (IOException)
-            {
-            }
-        }
-
-        return candidates;
-    }
-
-    private static string? FindInPath(string name)
-    {
-        var path = Environment.GetEnvironmentVariable("PATH");
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return null;
-        }
-        foreach (var segment in path.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            try
-            {
-                var candidate = Path.Combine(segment, name);
-                if (File.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
-            catch
-            {
-            }
-        }
-        return null;
-    }
-
-    private static IEnumerable<string> RunWhereCodex()
-    {
-        var results = new List<string>();
-        try
-        {
-            using var process = Process.Start(new ProcessStartInfo("where.exe", "codex")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
-            if (process is null)
-            {
-                return results;
-            }
-            var output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit(2000);
-            foreach (var line in output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                results.Add(line.Trim());
-            }
-        }
-        catch
-        {
-        }
-        return results;
-    }
-
-    private UsageRecord NormalizeUsage(JsonNode? accountNode, JsonNode? rateNode)
-    {
-        var email = accountNode?["email"]?.GetValue<string>();
-        var rateLimit = rateNode?["rate_limit"] as JsonObject;
-        var primary = NormalizeWhamWindow(rateLimit?["primary_window"]);
-        var secondary = NormalizeWhamWindow(rateLimit?["secondary_window"]);
-
-        return new UsageRecord
-        {
-            CheckedAt = UtcNow(),
-            Status = "ok",
-            Error = null,
-            Email = email,
-            Session = primary,
-            Weekly = secondary,
-        };
-    }
-
-    private static UsageWindow NormalizeWhamWindow(JsonNode? node)
-    {
-        return new UsageWindow(
-            node?["used_percent"]?.GetValue<double?>(),
-            node?["limit_window_seconds"]?.GetValue<int?>() is int seconds ? seconds / 60 : null,
-            node?["reset_at"]?.GetValue<long?>());
-    }
-
-    private static UsageWindow ReadUsageWindow(JsonNode? node)
-    {
-        return new UsageWindow(
-            node?["UsedPercent"]?.GetValue<double?>()
-                ?? node?["usedPercent"]?.GetValue<double?>()
-                ?? node?["used_percent"]?.GetValue<double?>(),
-            node?["WindowDurationMins"]?.GetValue<int?>()
-                ?? node?["windowDurationMins"]?.GetValue<int?>()
-                ?? (node?["limit_window_seconds"]?.GetValue<int?>() is int seconds ? seconds / 60 : null),
-            node?["ResetsAt"]?.GetValue<long?>()
-                ?? node?["resetsAt"]?.GetValue<long?>()
-                ?? node?["reset_at"]?.GetValue<long?>());
-    }
-
-    private CodexCredentials LoadCodexCredentials()
-    {
-        if (!File.Exists(_paths.ActiveAuthPath))
-        {
-            throw new InvalidOperationException("No existe auth.json en CODEX_HOME.");
-        }
-
-        var json = JsonNode.Parse(File.ReadAllText(_paths.ActiveAuthPath))?.AsObject()
-            ?? throw new InvalidOperationException("auth.json no es JSON valido.");
-
-        var apiKey = json["OPENAI_API_KEY"]?.GetValue<string?>()?.Trim();
-        if (!string.IsNullOrWhiteSpace(apiKey))
-        {
-            return new CodexCredentials(apiKey, null);
-        }
-
-        var tokens = json["tokens"]?.AsObject()
-            ?? throw new InvalidOperationException("auth.json no contiene tokens.");
-        var accessToken = tokens["access_token"]?.GetValue<string?>()?.Trim();
-        if (string.IsNullOrWhiteSpace(accessToken))
-        {
-            throw new InvalidOperationException("auth.json no contiene access_token.");
-        }
-
-        var accountId = tokens["account_id"]?.GetValue<string?>()?.Trim();
-        return new CodexCredentials(accessToken, string.IsNullOrWhiteSpace(accountId) ? null : accountId);
-    }
-
-    private string ResolveChatGptBaseUrl()
-    {
-        var baseUrl = "https://chatgpt.com/backend-api";
-        if (!File.Exists(_paths.CodexConfigPath))
-        {
-            return baseUrl;
-        }
-
-        try
-        {
-            var content = File.ReadAllText(_paths.CodexConfigPath);
-            foreach (var rawLine in content.Split('\n'))
-            {
-                var line = rawLine.Split('#')[0].Trim();
-                if (string.IsNullOrWhiteSpace(line))
-                {
-                    continue;
-                }
-                var parts = line.Split('=', 2);
-                if (parts.Length != 2 || parts[0].Trim() != "chatgpt_base_url")
-                {
-                    continue;
-                }
-                var value = parts[1].Trim().Trim('"', '\'').Trim();
-                if (string.IsNullOrWhiteSpace(value))
-                {
-                    continue;
-                }
-                while (value.EndsWith("/"))
-                {
-                    value = value[..^1];
-                }
-                if ((value.StartsWith("https://chatgpt.com", StringComparison.OrdinalIgnoreCase)
-                        || value.StartsWith("https://chat.openai.com", StringComparison.OrdinalIgnoreCase))
-                    && !value.Contains("/backend-api", StringComparison.OrdinalIgnoreCase))
-                {
-                    value += "/backend-api";
-                }
-                if (value.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
-                    || value.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)
-                    || value.StartsWith("http://localhost", StringComparison.OrdinalIgnoreCase))
-                {
-                    return value;
-                }
-            }
-        }
-        catch
-        {
-        }
-
-        return baseUrl;
-    }
-
-    private ProfileState BuildProfileState(ProfileMeta? profile, UsageRecord usage, bool isActive)
-    {
-        var status = BuildStatus(usage);
-        var name = profile?.Name ?? "Sin perfil activo";
-        var session = usage.Session.UsedPercent;
-        var weekly = usage.Weekly.UsedPercent;
         return new ProfileState(
-            Name: name,
+            Name: profile?.Name ?? "Sin perfil activo",
             IsActive: isActive,
             SessionUsedPercent: DisplayUsedPercent(usage.Session),
             SessionRemainingPercent: DisplayRemainingPercent(usage.Session),
@@ -568,7 +824,7 @@ internal sealed class CodexManagerService
             WeeklyRemainingPercent: DisplayRemainingPercent(usage.Weekly),
             WeeklyResetLabel: FormatReset(usage.Weekly.ResetsAt),
             UpdatedLabel: FormatRelative(usage.CheckedAt),
-            Status: status,
+            Status: BuildStatus(usage),
             Error: usage.Error,
             Email: profile?.Email);
     }
@@ -579,290 +835,24 @@ internal sealed class CodexManagerService
         {
             return "error";
         }
-        if (string.IsNullOrWhiteSpace(usage.CheckedAt))
+        if (!DateTimeOffset.TryParse(usage.CheckedAt, out var checkedAt))
         {
             return "never_checked";
         }
-        if (DateTimeOffset.TryParse(usage.CheckedAt, out var checkedAt))
-        {
-            if (DateTimeOffset.UtcNow - checkedAt > TimeSpan.FromMinutes(15))
-            {
-                return "stale";
-            }
-        }
-        return "ok";
-    }
-
-    private List<ProfileMeta> ListProfiles()
-    {
-        Directory.CreateDirectory(_paths.AccountsDir);
-        return Directory.GetDirectories(_paths.AccountsDir)
-            .Select(dir => LoadMeta(Path.GetFileName(dir)!))
-            .OrderBy(profile => profile.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
-
-    private ProfileMeta? DetectActiveProfile()
-    {
-        var config = LoadAppConfig();
-        if (!string.IsNullOrWhiteSpace(config.ActiveProfile) && File.Exists(Path.Combine(GetProfileDir(config.ActiveProfile), "auth.json")))
-        {
-            return LoadMeta(config.ActiveProfile);
-        }
-
-        if (!File.Exists(_paths.ActiveAuthPath))
-        {
-            return null;
-        }
-
-        var activeHash = ComputeSha(_paths.ActiveAuthPath);
-        foreach (var profile in ListProfiles())
-        {
-            var authPath = Path.Combine(GetProfileDir(profile.Name), "auth.json");
-            if (File.Exists(authPath) && string.Equals(ComputeSha(authPath), activeHash, StringComparison.OrdinalIgnoreCase))
-            {
-                SaveAppConfig(config with { ActiveProfile = profile.Name });
-                return profile;
-            }
-        }
-        return null;
-    }
-
-    private UsageRecord GetUsage(string profileName)
-    {
-        var cache = LoadUsageCache();
-        return cache.Accounts.TryGetValue(profileName, out var usage) ? usage : UsageRecord.Empty();
-    }
-
-    private void SaveUsage(string profileName, UsageRecord usage)
-    {
-        var cache = LoadUsageCache();
-        cache.Accounts[profileName] = usage;
-        SaveUsageCache(cache);
-    }
-
-    private UsageCacheFile LoadUsageCache()
-    {
-        if (!File.Exists(_paths.UsageCachePath))
-        {
-            return new UsageCacheFile(new Dictionary<string, UsageRecord>(StringComparer.OrdinalIgnoreCase));
-        }
-
-        try
-        {
-            var json = File.ReadAllText(_paths.UsageCachePath);
-            var node = JsonNode.Parse(json)?.AsObject();
-            var accountsNode =
-                node?["Accounts"]?.AsObject()
-                ?? node?["accounts"]?.AsObject();
-            var accounts = new Dictionary<string, UsageRecord>(StringComparer.OrdinalIgnoreCase);
-
-            if (accountsNode is not null)
-            {
-                foreach (var item in accountsNode)
-                {
-                    if (string.IsNullOrWhiteSpace(item.Key) || item.Value is not JsonObject usageObject)
-                    {
-                        continue;
-                    }
-
-                    accounts[item.Key] = new UsageRecord
-                    {
-                        CheckedAt =
-                            usageObject["CheckedAt"]?.GetValue<string?>()
-                            ?? usageObject["checked_at"]?.GetValue<string?>(),
-                        Status =
-                            usageObject["Status"]?.GetValue<string?>()
-                            ?? usageObject["status"]?.GetValue<string?>()
-                            ?? "never_checked",
-                        Error =
-                            usageObject["Error"]?.GetValue<string?>()
-                            ?? usageObject["error"]?.GetValue<string?>(),
-                        Email =
-                            usageObject["Email"]?.GetValue<string?>()
-                            ?? usageObject["email"]?.GetValue<string?>()
-                            ?? usageObject["account"]?["email"]?.GetValue<string?>(),
-                        Session = ReadUsageWindow(
-                            usageObject["Session"]
-                            ?? usageObject["session"]
-                            ?? usageObject["rateLimits"]?["primary"]),
-                        Weekly = ReadUsageWindow(
-                            usageObject["Weekly"]
-                            ?? usageObject["weekly"]
-                            ?? usageObject["rateLimits"]?["secondary"]),
-                    };
-                }
-            }
-
-            return new UsageCacheFile(accounts);
-        }
-        catch
-        {
-            return new UsageCacheFile(new Dictionary<string, UsageRecord>(StringComparer.OrdinalIgnoreCase));
-        }
-    }
-
-    private void SaveUsageCache(UsageCacheFile cache)
-    {
-        File.WriteAllText(_paths.UsageCachePath, JsonSerializer.Serialize(cache, JsonOptions));
-    }
-
-    private AppConfig LoadAppConfig()
-    {
-        if (!File.Exists(_paths.AppConfigPath))
-        {
-            return new AppConfig(null, null);
-        }
-        try
-        {
-            var json = File.ReadAllText(_paths.AppConfigPath);
-            var node = JsonNode.Parse(json)?.AsObject();
-            var activeProfile =
-                node?["ActiveProfile"]?.GetValue<string?>()
-                ?? node?["active_profile"]?.GetValue<string?>()
-                ?? node?["activeProfile"]?.GetValue<string?>();
-            var lastUpdatedAt =
-                node?["LastUpdatedAt"]?.GetValue<string?>()
-                ?? node?["last_updated_at"]?.GetValue<string?>()
-                ?? node?["lastUpdatedAt"]?.GetValue<string?>();
-            return new AppConfig(NormalizeProfileNameOrNull(activeProfile), lastUpdatedAt);
-        }
-        catch
-        {
-            return new AppConfig(null, null);
-        }
-    }
-
-    private void SaveAppConfig(AppConfig config)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(_paths.AppConfigPath)!);
-        File.WriteAllText(_paths.AppConfigPath, JsonSerializer.Serialize(config, JsonOptions));
-    }
-
-    private ProfileMeta LoadMeta(string profileName)
-    {
-        var metaPath = Path.Combine(GetProfileDir(profileName), "meta.json");
-        if (!File.Exists(metaPath))
-        {
-            return new ProfileMeta(profileName, null, null, _paths.CodexHome, null);
-        }
-        try
-        {
-            var json = File.ReadAllText(metaPath);
-            var node = JsonNode.Parse(json)?.AsObject();
-            var name =
-                NormalizeProfileNameOrNull(node?["Name"]?.GetValue<string?>())
-                ?? NormalizeProfileNameOrNull(node?["profile_name"]?.GetValue<string?>())
-                ?? NormalizeProfileNameOrNull(node?["name"]?.GetValue<string?>())
-                ?? profileName;
-            var createdAt =
-                node?["CreatedAt"]?.GetValue<string?>()
-                ?? node?["created_at"]?.GetValue<string?>();
-            var updatedAt =
-                node?["UpdatedAt"]?.GetValue<string?>()
-                ?? node?["updated_at"]?.GetValue<string?>();
-            var sourceCodexHome =
-                node?["SourceCodexHome"]?.GetValue<string?>()
-                ?? node?["source_codex_home"]?.GetValue<string?>()
-                ?? _paths.CodexHome;
-            var email =
-                node?["Email"]?.GetValue<string?>()
-                ?? node?["optional_display_email"]?.GetValue<string?>()
-                ?? node?["email"]?.GetValue<string?>();
-            return new ProfileMeta(name, createdAt, updatedAt, sourceCodexHome, email);
-        }
-        catch
-        {
-            return new ProfileMeta(profileName, null, null, _paths.CodexHome, null);
-        }
-    }
-
-    private void SaveMeta(string profileName, ProfileMeta meta)
-    {
-        var metaPath = Path.Combine(GetProfileDir(profileName), "meta.json");
-        Directory.CreateDirectory(Path.GetDirectoryName(metaPath)!);
-        File.WriteAllText(metaPath, JsonSerializer.Serialize(meta, JsonOptions));
-    }
-
-    private void UpdateProfileMeta(string profileName, Func<ProfileMeta, ProfileMeta> update)
-    {
-        SaveMeta(profileName, update(LoadMeta(profileName)));
-    }
-
-    private static string ComputeSha(string filePath)
-    {
-        using var sha = SHA256.Create();
-        using var stream = File.OpenRead(filePath);
-        return Convert.ToHexString(sha.ComputeHash(stream));
-    }
-
-    private void BackupIfExists(string filePath, string prefix)
-    {
-        if (!File.Exists(filePath))
-        {
-            return;
-        }
-        Directory.CreateDirectory(_paths.BackupsDir);
-        var safePrefix = Regex.Replace(prefix, @"[^A-Za-z0-9._-]", "_");
-        var backupPath = Path.Combine(_paths.BackupsDir, $"{safePrefix}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.bak");
-        File.Copy(filePath, backupPath, true);
-    }
-
-    private string SanitizeProfileName(string name)
-    {
-        var value = name.Trim();
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            throw new InvalidOperationException("El nombre del perfil no puede estar vacio.");
-        }
-        if (!Regex.IsMatch(value, @"^[A-Za-z0-9._ -]{1,64}$"))
-        {
-            throw new InvalidOperationException("El nombre del perfil contiene caracteres no permitidos.");
-        }
-        return value;
-    }
-
-    private string GetProfileDir(string profileName) => Path.Combine(_paths.AccountsDir, SanitizeProfileName(profileName));
-
-    private string? NormalizeProfileNameOrNull(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-        try
-        {
-            return SanitizeProfileName(value);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private string ReadConfigSummary()
-    {
-        if (!File.Exists(_paths.CodexConfigPath))
-        {
-            return "config.toml no existe";
-        }
-        var content = File.ReadAllText(_paths.CodexConfigPath);
-        return content.Contains("cli_auth_credentials_store = \"file\"", StringComparison.Ordinal)
-            ? "modo file"
-            : "sin modo file";
+        return DateTimeOffset.UtcNow - checkedAt > TimeSpan.FromMinutes(15) ? "stale" : "ok";
     }
 
     private void NotifyStateChanged() => StateChanged?.Invoke(this, EventArgs.Empty);
 
-    private void Log(string message, Exception? ex = null)
+    private void Log(string message, Exception? exception)
     {
         try
         {
             Directory.CreateDirectory(_paths.LogsDir);
             var line = $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] {message}";
-            if (ex is not null)
+            if (exception is not null)
             {
-                line += $" {ex}";
+                line += $" {exception.GetType().Name}: {exception.Message}";
             }
             File.AppendAllLines(_paths.LogFilePath, [line]);
         }
@@ -871,8 +861,25 @@ internal sealed class CodexManagerService
         }
     }
 
-    private static string UtcNow() => DateTimeOffset.UtcNow.ToString("O");
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+    }
 
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+        _authWatcher?.Dispose();
+        _credentialGate.Dispose();
+        _switchGate.Dispose();
+        _usageGate.Dispose();
+    }
+
+    private static string UtcNow() => DateTimeOffset.UtcNow.ToString("O");
     private static double? Clamp(double? value) => value.HasValue ? Math.Clamp(value.Value, 0d, 100d) : null;
     private static double? Remaining(double? value) => value.HasValue ? Math.Clamp(100d - value.Value, 0d, 100d) : null;
     private static double? DisplayUsedPercent(UsageWindow window) => HasResetElapsed(window.ResetsAt) ? 0d : Clamp(window.UsedPercent);
@@ -884,7 +891,6 @@ internal sealed class CodexManagerService
         {
             return false;
         }
-
         try
         {
             return DateTimeOffset.FromUnixTimeSeconds(unixSeconds.Value) <= DateTimeOffset.Now;
@@ -909,11 +915,7 @@ internal sealed class CodexManagerService
             {
                 return "Updated";
             }
-            if (delta.TotalDays >= 1)
-            {
-                return reset.ToString("dd/MM");
-            }
-            return reset.ToString("HH:mm");
+            return delta.TotalDays >= 1 ? reset.ToString("dd/MM") : reset.ToString("HH:mm");
         }
         catch
         {
@@ -943,97 +945,3 @@ internal sealed class CodexManagerService
         return $"Updated {(int)delta.TotalDays}d ago";
     }
 }
-
-internal sealed record AppPaths(
-    string CodexHome,
-    string ActiveAuthPath,
-    string CodexConfigPath,
-    string AppHome,
-    string AccountsDir,
-    string BackupsDir,
-    string UsageCachePath,
-    string AppConfigPath,
-    string LogsDir,
-    string LogFilePath,
-    string StartupFolder,
-    string StartupShortcutPath)
-{
-    public static AppPaths Build()
-    {
-        var codexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
-        if (string.IsNullOrWhiteSpace(codexHome))
-        {
-            codexHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
-        }
-
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        var appHome = Path.Combine(appData, "CodexAccountTrayManager");
-        var startupFolder = Path.Combine(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
-
-        return new AppPaths(
-            codexHome,
-            Path.Combine(codexHome, "auth.json"),
-            Path.Combine(codexHome, "config.toml"),
-            appHome,
-            Path.Combine(appHome, "accounts"),
-            Path.Combine(appHome, "backups"),
-            Path.Combine(appHome, "cache", "usage_cache.json"),
-            Path.Combine(appHome, "config", "app_config.json"),
-            Path.Combine(appHome, "logs"),
-            Path.Combine(appHome, "logs", "app.log"),
-            startupFolder,
-            Path.Combine(startupFolder, "CodexManager.lnk"));
-    }
-
-    public void EnsureDirectories()
-    {
-        Directory.CreateDirectory(CodexHome);
-        Directory.CreateDirectory(AppHome);
-        Directory.CreateDirectory(AccountsDir);
-        Directory.CreateDirectory(BackupsDir);
-        Directory.CreateDirectory(Path.GetDirectoryName(UsageCachePath)!);
-        Directory.CreateDirectory(Path.GetDirectoryName(AppConfigPath)!);
-        Directory.CreateDirectory(LogsDir);
-    }
-}
-
-internal sealed record CodexBinaryStatus(bool Available, string? Path, string Message);
-internal sealed record AppConfig(string? ActiveProfile, string? LastUpdatedAt);
-internal sealed record ProfileMeta(string Name, string? CreatedAt, string? UpdatedAt, string SourceCodexHome, string? Email);
-internal sealed record UsageWindow(double? UsedPercent, int? WindowDurationMins, long? ResetsAt);
-internal sealed record UsageRecord
-{
-    public string? CheckedAt { get; init; }
-    public string Status { get; init; } = "never_checked";
-    public string? Error { get; init; }
-    public string? Email { get; init; }
-    public UsageWindow Session { get; init; } = new(null, null, null);
-    public UsageWindow Weekly { get; init; } = new(null, null, null);
-
-    public static UsageRecord Empty() => new();
-    public static UsageRecord FromError(string message) => new() { CheckedAt = DateTimeOffset.UtcNow.ToString("O"), Status = "error", Error = message };
-}
-
-internal sealed record UsageCacheFile(Dictionary<string, UsageRecord> Accounts);
-internal sealed record CodexCredentials(string AccessToken, string? AccountId);
-
-internal sealed record ProfileState(
-    string Name,
-    bool IsActive,
-    double? SessionUsedPercent,
-    double? SessionRemainingPercent,
-    string SessionResetLabel,
-    double? WeeklyUsedPercent,
-    double? WeeklyRemainingPercent,
-    string WeeklyResetLabel,
-    string UpdatedLabel,
-    string Status,
-    string? Error,
-    string? Email);
-
-internal sealed record DashboardState(
-    ProfileState ActiveProfile,
-    IReadOnlyList<ProfileState> Profiles,
-    string SettingsSummary,
-    string DataFolder,
-    string LogsFolder);
