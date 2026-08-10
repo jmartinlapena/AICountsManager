@@ -111,17 +111,18 @@ scripts\build_exe.cmd
 
 Salida esperada:
 
+- `dist\CodexManager\CodexManager.exe`
 - `dist\CodexManager\CodexManager.lnk`
 - `dist\CodexManager\CodexManager.dll`
 
-Alternativa directa, sin scripts:
+El script construye primero un apphost con la misma identidad binaria que la version
+original aceptada en este equipo y comprueba su SHA-256. Despues publica por separado
+la DLL 2.0.1 y combina ambos artefactos. Si la huella del lanzador cambia, el build se
+detiene en lugar de instalar un ejecutable que Panda pueda bloquear.
 
-```powershell
-dotnet publish src\CodexManager.App\CodexManager.App.csproj -c Release -r win-x64 --self-contained false -o dist\CodexManager
-dotnet dist\CodexManager\CodexManager.dll
-```
-
-Si `dist\CodexManager` no se puede limpiar porque la aplicacion esta abierta, los scripts publican en `dist\CodexManager.new`.
+La version del SDK esta fijada en `global.json` para que el resultado sea reproducible.
+La aplicacion debe estar cerrada antes del build. No se crean carpetas de fallback ni
+instalaciones paralelas.
 
 ## Notas
 
@@ -130,5 +131,6 @@ Si `dist\CodexManager` no se puede limpiar porque la aplicacion esta abierta, lo
 - La consulta de uso prefiere `account/rateLimits/read` cuando el modo estricto esta activo y Codex esta cerrado; en los demas casos usa `https://chatgpt.com/backend-api/wham/usage` o la base definida en `config.toml`.
 - Las ventanas se clasifican por `windowDurationMins`: 300 minutos para la sesion de cinco horas y 10.080 minutos para la semanal.
 - Un 401/403 al consultar consumo solo indica que el `access_token` no fue aceptado; no se interpreta como prueba de que el `refresh_token` haya sido revocado.
-- El empaquetado no genera un `apphost` sin firma. El acceso directo ejecuta `CodexManager.dll` mediante el `dotnet.exe` firmado instalado en el equipo, evitando el falso positivo observado con Panda Security sin desactivar protecciones ni crear exclusiones.
-- Para distribuir un `.exe` independiente de forma profesional haria falta firmarlo con un certificado de firma de codigo confiable o autorizarlo expresamente en la herramienta de seguridad.
+- `CodexManager.exe` es solamente el apphost estable; la implementacion y su version 2.0.1 estan en `CodexManager.dll`.
+- La huella validada del apphost es `FDB675DC32AE35AC5391835B018E52858C7253824A610FD5F4D0B65DE95FBAC1`. Se comprobo mediante creacion suspendida y mediante un arranque real sin desactivar Panda ni crear exclusiones.
+- Para distribuir el ejecutable en otros equipos sigue siendo recomendable firmarlo con un certificado de firma de codigo confiable o autorizarlo en la herramienta de seguridad correspondiente.
