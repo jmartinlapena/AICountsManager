@@ -13,7 +13,24 @@ internal sealed class CodexManagerService : IDisposable
     private readonly ProfileRepository _profiles;
     private readonly ICodexProcessController _processController;
     private readonly ICodexAppServerClient _appServer;
-    private readonly IUsageClient _usageClient;
+    private readonly CodexQuotaProvider _codexProvider;
+    private readonly CurrentProviderRegistry _otherProviders;
+    private readonly AntigravityTokenHistory _antigravityHistory;
+    public bool AntigravityEnabled => _otherProviders.IsEnabled(ProviderIds.Antigravity);
+    public IReadOnlyList<CurrentProviderSetting> CurrentProviders => _otherProviders.Settings;
+    public Task SetAntigravityEnabledAsync(bool enabled) => SetCurrentProviderEnabledAsync(ProviderIds.Antigravity, enabled);
+    public async Task SetCurrentProviderEnabledAsync(string id, bool enabled)
+    {
+        await _otherProviders.SetEnabledAsync(id, enabled, CancellationToken.None);
+        NotifyStateChanged();
+    }
+    public async Task RefreshCurrentProvidersAsync(CancellationToken token = default)
+    {
+        try { await RefreshActiveProfileAsync(token); }
+        finally { await _otherProviders.RefreshAsync(token); if (!_disposed) NotifyStateChanged(); }
+    }
+    private async Task<UsageRecord> ReadCodexUsageAsync(AuthSnapshot snapshot, CancellationToken token) =>
+        CodexQuotaProvider.Legacy(await QuotaQuery.ReadAsync(_codexProvider, new CodexQuotaRequest(snapshot, _paths.CodexConfigPath), token));
     private readonly SemaphoreSlim _credentialGate = new(1, 1);
     private readonly SemaphoreSlim _switchGate = new(1, 1);
     private readonly SemaphoreSlim _usageGate = new(1, 1);
@@ -21,8 +38,13 @@ internal sealed class CodexManagerService : IDisposable
     private bool _disposed;
     private readonly TokenHistory _history;
     private DateTimeOffset _nextBatchAllowed;
-    public TokenHistorySnapshot History => _history.Snapshot;
-    public Task<TokenHistorySnapshot> RefreshHistoryAsync(CancellationToken token = default) => _history.RefreshAsync(token);
+    public TokenHistorySnapshot History => _otherProviders.IsEnabled(ProviderIds.Antigravity) ? ProviderHistory.Merge(_history.Snapshot, _antigravityHistory.Snapshot) : _history.Snapshot;
+    public async Task<TokenHistorySnapshot> RefreshHistoryAsync(CancellationToken token = default)
+    {
+        await _history.RefreshAsync(token);
+        if (_otherProviders.IsEnabled(ProviderIds.Antigravity)) await _antigravityHistory.RefreshAsync(token);
+        return History;
+    }
 
 
     public event EventHandler? StateChanged;
@@ -37,7 +59,7 @@ internal sealed class CodexManagerService : IDisposable
         ICodexProcessController? processController,
         ICodexAppServerClient? appServer,
         IUsageClient? usageClient,
-        bool startWatcher)
+        bool startWatcher, IQuotaProvider? currentProvider = null, string? geminiHome = null, IEnumerable<IQuotaProvider>? additionalProviders = null)
     {
         _paths = paths;
         Diagnostics = new AppDiagnostics(paths.LogsDir);
@@ -46,7 +68,10 @@ internal sealed class CodexManagerService : IDisposable
         _profiles = new ProfileRepository(paths, Log);
         _processController = processController ?? new CodexProcessController();
         _appServer = appServer ?? new CodexAppServerClient(paths);
-        _usageClient = usageClient ?? new UsageClient();
+        _codexProvider = new CodexQuotaProvider(usageClient ?? new UsageClient());
+        var current = currentProvider ?? (startWatcher ? AntigravityCloudProvider.Create() : null);
+        _otherProviders = new CurrentProviderRegistry(paths, (current is null ? Array.Empty<IQuotaProvider>() : [current]).Concat(additionalProviders ?? []));
+        _antigravityHistory = new AntigravityTokenHistory(geminiHome ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini"), Path.Combine(paths.AppHome, "cache", "antigravity_history.json"));
 
         try
         {
@@ -99,8 +124,9 @@ internal sealed class CodexManagerService : IDisposable
             LogsFolder: _paths.LogsDir,
             StrictVerification: config.StrictVerification,
             CodexRunning: runtime.IsRunning,
-            UpdatedLabel: FormatRelative(usageCache.Accounts.Values.Select(u => u.CheckedAt)
-                .Where(value => DateTimeOffset.TryParse(value, out _)).OrderByDescending(value => DateTimeOffset.Parse(value!)).FirstOrDefault()));
+            UpdatedLabel: FormatRelative(usageCache.Accounts.Values.Select(u => u.CheckedAt).Concat(_otherProviders.Accounts.Select(a => a.CheckedAt))
+                .Where(value => DateTimeOffset.TryParse(value, out _)).OrderByDescending(value => DateTimeOffset.Parse(value!)).FirstOrDefault()),
+            OtherAccounts: _otherProviders.Accounts, AccountOrder: config.AccountOrder);
     }
 
     public string BuildTrayTooltip(DashboardState state)
@@ -125,7 +151,25 @@ internal sealed class CodexManagerService : IDisposable
             var existing = _profiles.ListProfiles().Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
             if (names.Count != existing.Count || names.Distinct(StringComparer.OrdinalIgnoreCase).Count() != names.Count || !existing.SetEquals(names))
                 throw new InvalidOperationException("La lista de cuentas ha cambiado. Vuelve a ordenar las cuentas actuales.");
-            _profiles.SaveAppConfig(_profiles.LoadAppConfig() with { ProfileOrder = names.ToArray(), LastUpdatedAt = UtcNow() });
+            var config = _profiles.LoadAppConfig();
+            _profiles.SaveAppConfig(config with { ProfileOrder = names.ToArray(), AccountOrder = AccountOrdering.ReplaceVisible(config.AccountOrder, names.Select(AccountOrdering.Codex).ToArray()), LastUpdatedAt = UtcNow() });
+            return Task.CompletedTask;
+        }, cancellationToken);
+
+    public Task SetAccountOrderAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default) =>
+        MutateProfilesAsync(() =>
+        {
+            var profiles = _profiles.ListProfiles();
+            var existing = profiles.Select(p => AccountOrdering.Codex(p.Name)).Concat(_otherProviders.Accounts.Select(a => AccountOrdering.Current(a.Provider))).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (ids.Count != existing.Count || ids.Distinct(StringComparer.OrdinalIgnoreCase).Count() != ids.Count || !existing.SetEquals(ids))
+                throw new InvalidOperationException("La lista de cuentas ha cambiado. Vuelve a ordenar las cuentas actuales.");
+            var config = _profiles.LoadAppConfig();
+            _profiles.SaveAppConfig(config with
+            {
+                AccountOrder = AccountOrdering.ReplaceVisible(config.AccountOrder, ids),
+                ProfileOrder = ids.Where(id => id.StartsWith("codex:", StringComparison.OrdinalIgnoreCase)).Select(id => profiles.Single(p => string.Equals(AccountOrdering.Codex(p.Name), id, StringComparison.OrdinalIgnoreCase)).Name).ToArray(),
+                LastUpdatedAt = UtcNow()
+            });
             return Task.CompletedTask;
         }, cancellationToken);
 
@@ -176,7 +220,7 @@ internal sealed class CodexManagerService : IDisposable
 
             // Background polling must stay lightweight and credential read-only.
             // Strict app-server verification is reserved for the account-switch flow.
-            var usage = await _usageClient.ReadAsync(live, _paths.CodexConfigPath, cancellationToken);
+            var usage = await ReadCodexUsageAsync(live, cancellationToken);
 
             _profiles.SaveUsage(config.ActiveProfile, usage);
             NotifyStateChanged();
@@ -232,7 +276,7 @@ internal sealed class CodexManagerService : IDisposable
                         timeout.CancelAfter(TimeSpan.FromSeconds(12));
                         var stored = await _profiles.LoadProfileSnapshotAsync(profile.Name, timeout.Token);
                         var snapshot = live is not null && live.Identity.Matches(stored.Identity) && live.CompareGenerationTo(stored) >= 0 ? live : stored;
-                        return await _usageClient.ReadAsync(snapshot, _paths.CodexConfigPath, timeout.Token);
+                        return await ReadCodexUsageAsync(snapshot, timeout.Token);
                     }
                     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return UsageRecord.FromError("La consulta agotó el tiempo de espera."); }
                     catch (OperationCanceledException) { throw; }
@@ -248,6 +292,11 @@ internal sealed class CodexManagerService : IDisposable
                     { limited = true; _nextBatchAllowed = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, result.RetryAfterSeconds ?? 60)); }
                     progress?.Report($"Actualizando cuentas · {completed}/{profiles.Count}");
                 }
+            }
+            if (!deadline.IsCancellationRequested)
+            {
+                try { await _otherProviders.RefreshAsync(deadline.Token); }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
             }
             cancellationToken.ThrowIfCancellationRequested();
             _nextBatchAllowed = _nextBatchAllowed > DateTimeOffset.UtcNow ? _nextBatchAllowed : DateTimeOffset.UtcNow.AddSeconds(15);

@@ -7,7 +7,7 @@ internal sealed record TokenDay(string Date, IReadOnlyDictionary<string, long> M
 {
     public long Total => Models.Values.Aggregate(0L, (a, b) => b > 0 && a > long.MaxValue - b ? long.MaxValue : a + b);
 }
-internal sealed record TokenHistorySnapshot(IReadOnlyList<TokenDay> Days, bool Partial, string? UpdatedAt, string? Error, bool CatchingUp = false)
+internal sealed record TokenHistorySnapshot(IReadOnlyList<TokenDay> Days, bool Partial, string? UpdatedAt, string? Error, bool CatchingUp = false, IReadOnlyDictionary<string, TokenHistorySnapshot>? Sources = null)
 {
     public static TokenHistorySnapshot Empty { get; } = new([], false, null, null);
 }

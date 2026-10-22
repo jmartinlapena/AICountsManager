@@ -17,7 +17,7 @@ internal static partial class Program
         var today = DateOnly.FromDateTime(DateTime.Today); var monday = HistoryPanel.Monday(today);
         var data = new TokenHistorySnapshot(Enumerable.Range(0, 14).Select(i => new TokenDay(today.AddDays(i - 13).ToString("yyyy-MM-dd"),
             new Dictionary<string, long> { ["model-" + i] = 1_234_567 + i })).ToArray(), false, DateTimeOffset.UtcNow.ToString("O"), null);
-        panel.Update(data); UiClick(UiField<C.Button>(panel, "_week"));
+        panel.Update(data); panel.ShowPeriod(false);
         var total = UiField<C.TextBlock>(panel, "_total"); var period = UiField<C.TextBlock>(panel, "_period");
         var chart = UiField<C.Grid>(panel, "_chart");
         var summary = total.Text; var summaryPeriod = period.Text;
@@ -37,7 +37,7 @@ internal static partial class Program
             Check(button.IsEnabled == (monday.AddDays(i) <= today), "Future day is selectable.");
         UiClick((C.Button)chart.Children[0]); UiClick(UiField<C.Button>(panel, "_previous"));
         Check(!period.Text.Contains(monday.ToString("dddd, dd MMM yyyy")), "Week navigation retained unrelated daily selection.");
-        UiClick(UiField<C.Button>(panel, "_today"));
+        panel.ShowPeriod(true);
         var yesterday = today.AddDays(-1); UiClick((C.Button)chart.Children[5]);
         Check(total.Text == data.Days.Single(d => d.Date == yesterday.ToString("yyyy-MM-dd")).Total.ToString("N0"), "Daily view click did not select yesterday.");
         panel.Update(data with { Days = Array.Empty<TokenDay>() });

@@ -120,6 +120,9 @@
       </ScrollViewer>
       <ScrollViewer x:Name="SettingsScroll" Grid.Row="2" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Margin="0,4,4,0">
+          <TextBlock Text="Proveedores" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,10"/>
+          <StackPanel x:Name="ProviderToggles"/>
+          <TextBlock Text="Consulta los límites de la sesión guardada. El cambio de cuenta sigue disponible solo para Codex." Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,16"/>
           <TextBlock Text="Orden de las cuentas" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,6"/>
           <TextBlock Text="Usa las flechas. El orden se conserva al cambiar de cuenta." Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/>
           <StackPanel x:Name="OrderList" Margin="0,0,0,14"/>

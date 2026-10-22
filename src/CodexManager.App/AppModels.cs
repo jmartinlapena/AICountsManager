@@ -87,7 +87,7 @@ internal sealed record AppConfig(
     string? ActiveProfile,
     string? LastUpdatedAt,
     bool StrictVerification = false,
-    IReadOnlyList<string>? ProfileOrder = null);
+    IReadOnlyList<string>? ProfileOrder = null, IReadOnlyList<string>? AccountOrder = null);
 
 internal sealed record ProfileMeta(
     string Name,
@@ -152,7 +152,10 @@ internal sealed record DashboardState(
     string LogsFolder,
     bool StrictVerification,
     bool CodexRunning,
-    string? UpdatedLabel = null);
+    string? UpdatedLabel = null, IReadOnlyList<ProviderUsage>? OtherAccounts = null, IReadOnlyList<string>? AccountOrder = null)
+{
+    public IReadOnlyList<OrderedAccount> OrderedAccounts => AccountOrdering.Resolve(Profiles, OtherAccounts, AccountOrder);
+}
 
 internal enum SwitchProfileStatus
 {

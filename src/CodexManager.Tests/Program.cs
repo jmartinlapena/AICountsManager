@@ -9,6 +9,24 @@ internal static partial class Program
 {
     private static readonly (string Name, Func<Task> Run)[] Tests =
     [
+        ("all provider display values and marker positions match Codex", ProviderDisplayParityAsync),
+        ("only Codex accepts saved accounts and account switching capability", CurrentProviderBoundaryAsync),
+        ("registered providers appear automatically in settings, add menu and account order", RegisteredProvidersUiAsync),
+        ("Gemini first-day reference and integer labels match Codex", GeminiFirstDayAsync),
+        ("weekly-only pace and forecast agree across providers", WeeklyOnlyPaceAsync),
+        ("unified account order migrates, persists, renames and restores disabled providers", UnifiedOrderPersistsAsync),
+        ("external accounts reorder within the same settings and dashboard list", UnifiedOrderUiAsync),
+        ("direct cloud query works without app, refreshes once and follows session", CloudQuotaAsync),
+        ("cloud outages, rate limits and unauthorized responses are isolated", CloudFailuresAsync),
+        ("same named models and missing history remain isolated by provider", ProviderModelIsolationAsync),
+        ("Antigravity exact five limits and unknown/disabled windows", AntigravityQuotaParsingAsync),
+        ("Antigravity current identity is verified and loopback only", AntigravityIdentityAsync),
+        ("multi-provider refresh preserves Codex credentials and isolates failures", MultiProviderRefreshAsync),
+        ("provider cache never merges identities and respects disable", ProviderCacheIdentityAsync),
+        ("provider registry isolates adapters and persists enablement independently", ProviderRegistryAsync),
+        ("Antigravity accounting rejects malformed and undated data", AntigravityAccountingAsync),
+        ("Antigravity SQLite history is incremental, read-only and persistent", AntigravitySqliteHistoryAsync),
+        ("provider groups, tabs and read-only card preserve Codex UI", ProviderUiAsync),
         ("refresh survives final storage read failure and retries", RefreshStorageFailureAsync),
         ("posted tray notification contains storage failures", TrayPostedFailureAsync),
         ("disposing flyout cancels pending refresh safely", RefreshDisposalAsync),
@@ -62,7 +80,25 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args is ["--render-gemini-first-day", var geminiImage]) { await RenderGeminiFirstDayAsync(geminiImage); return 0; }
         if (args is ["--probe-refresh-storage-failure"]) { await RefreshStorageFailureAsync(); return 0; }
+        if (args is ["--probe-tray-providers"]) { await ProbeTrayRefreshAsync(antigravity: true); return 0; }
+        if (args is ["--measure-providers", var measurement]) { await MeasureUiResourcesAsync(measurement, true); return 0; }
+        if (args is ["--provider-tests"]) { foreach (var t in Tests.Take(18)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--render-providers", var folder]) { await RenderProviderUiAsync(folder); return 0; }
+        if (args is ["--audit-antigravity-history", var historyCache])
+        {
+            var scanner = new AntigravityTokenHistory(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini"), historyCache);
+            var history = await scanner.RefreshAsync(default);
+            Console.WriteLine(JsonSerializer.Serialize(new { Source = "Antigravity only", Rows = scanner.LastRowsRead, Days = history.Days.Count, Total = history.Days.Sum(d => d.Total), Measured = history.UpdatedAt is not null, history.Partial, history.CatchingUp })); return 0;
+        }
+        if (args is ["--probe-antigravity"])
+        {
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            var reading = await QuotaQuery.ReadAsync(new AntigravityCloudProvider(new WindowsAntigravityCredentials(), new System.Net.Http.HttpClient(new System.Net.Http.HttpClientHandler { AllowAutoRedirect = false })), new CurrentQuotaRequest(), CancellationToken.None);
+            Console.WriteLine(JsonSerializer.Serialize(new { reading.Status, reading.Plan, HasEmail = !string.IsNullOrWhiteSpace(reading.Email), reading.Quotas, Milliseconds = timer.ElapsedMilliseconds }));
+            return reading.Status == "ok" && reading.Quotas.Count >= 4 || reading.Status == "error" && reading.Error is not null ? 0 : 1;
+        }
         if (args is ["--probe-tray-refresh-live-quota"]) { await ProbeTrayRefreshAsync(true, true); return 0; }
         if (args is ["--probe-tray-refresh-live-history"]) { await ProbeTrayRefreshAsync(true); return 0; }
         if (args is ["--probe-tray-refresh"]) { await ProbeTrayRefreshAsync(); return 0; }

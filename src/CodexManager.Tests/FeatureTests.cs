@@ -85,10 +85,10 @@ internal static partial class Program
         form.ApplyState(service.BuildDashboardState()); form.SetHistoryPreview(SampleHistory());
         form.Visual.Left = -20000; form.Visual.Top = -20000; form.Visual.Show(); form.Visual.UpdateLayout();
         var stack = (System.Windows.Controls.StackPanel)form.Visual.FindName("DashboardStack");
-        var history = (HistoryPanel)stack.Children[0];
+        var history = UiField<HistoryPanel>(form, "_historyPanel");
         static T Field<T>(object owner, string name) => (T)owner.GetType().GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(owner)!;
         static void Click(System.Windows.Controls.Button button) => button.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
-        Click(Field<System.Windows.Controls.Button>(history, "_week"));
+        Click(UiField<System.Windows.Controls.Button>(UiField<ProviderOverview>(form, "_overview"), "_week"));
         var label = Field<System.Windows.Controls.TextBlock>(history, "_period"); var current = label.Text;
         Click(Field<System.Windows.Controls.Button>(history, "_previous")); Check(label.Text != current, "History navigation did not move the calendar week.");
         Click(Field<System.Windows.Controls.Button>(history, "_models"));

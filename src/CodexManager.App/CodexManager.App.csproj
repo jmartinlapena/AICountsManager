@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>CodexManager</AssemblyName>
     <RootNamespace>CodexManager</RootNamespace>
-    <Version>2.2.4</Version>
+    <Version>2.3.5</Version>
     <UseAppHost>false</UseAppHost>
     <PublishSingleFile>false</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
@@ -19,6 +19,7 @@
     <Using Include="System.Net.Http" />
     <Page Remove="WidgetWindow.xaml" />
     <EmbeddedResource Include="WidgetWindow.xaml" />
+    <Content Include="..\..\assets\provider-icons-LICENSE.txt"><Link>assets/provider-icons-LICENSE.txt</Link><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
     <Content Include="..\..\assets\icon.ico">
       <Link>assets\icon.ico</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

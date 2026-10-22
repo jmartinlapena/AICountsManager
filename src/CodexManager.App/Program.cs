@@ -138,7 +138,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         try
         {
-            await _service.RefreshActiveProfileAsync(_lifetime.Token);
+            await _service.RefreshCurrentProvidersAsync(_lifetime.Token);
         }
         catch (Exception ex)
         {

@@ -6,16 +6,18 @@ namespace CodexManager.Tests;
 
 internal static partial class Program
 {
-    private static Task MeasureUiResourcesAsync(string output) => InTemporaryStoreAsync(paths => RunOnUiThreadAsync(async () =>
+    private static Task MeasureUiResourcesAsync(string output, bool providers = false) => InTemporaryStoreAsync(paths => RunOnUiThreadAsync(async () =>
     {
         using var service = CreateService(paths);
         using var form = new WidgetForm(service, startClock: false);
         form.Visual.Title = "Codex manager · Medición con datos ficticios";
-        form.Visual.ShowInTaskbar = true; form.Visual.Topmost = false;
+        ((System.Windows.Controls.TextBlock)form.Visual.FindName("TitleLabel")).Text = "Prueba · datos ficticios"; form.Visual.ShowInTaskbar = true; form.Visual.Topmost = false;
         form.Visual.Height = 710;
         form.Visual.Left = Math.Max(0, System.Windows.SystemParameters.WorkArea.Right - 400);
         form.Visual.Top = Math.Max(0, System.Windows.SystemParameters.WorkArea.Bottom - 730);
-        form.ApplyState(SampleState()); form.SetHistoryPreview(SampleHistory()); form.Visual.Show();
+        form.ApplyState(providers ? SampleState() with { OtherAccounts = [SampleAntigravity()] } : SampleState());
+        form.SetHistoryPreview(providers ? ProviderHistory.Merge(SampleHistory(), SampleAntigravityHistory()) : SampleHistory()); form.Visual.Show();
+        if (providers) UiClick(UiField<System.Windows.Controls.Button>(UiField<ProviderOverview>(form, "_overview"), "_today"));
         await Task.Delay(5000);
         var samples = new List<object> { await SampleResourcesAsync("Panel visible; datos ficticios", form.AcrylicEnabled) };
         form.Hide(); await Task.Delay(2000);

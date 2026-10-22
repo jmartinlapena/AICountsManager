@@ -208,6 +208,7 @@ internal sealed class ProfileRepository
         {
             ActiveProfile = string.Equals(appConfig.ActiveProfile, currentName, StringComparison.OrdinalIgnoreCase) ? newName : appConfig.ActiveProfile,
             ProfileOrder = appConfig.ProfileOrder?.Select(name => string.Equals(name, currentName, StringComparison.OrdinalIgnoreCase) ? newName : name).ToArray(),
+            AccountOrder = appConfig.AccountOrder?.Select(id => string.Equals(id, AccountOrdering.Codex(currentName), StringComparison.OrdinalIgnoreCase) ? AccountOrdering.Codex(newName) : id).ToArray(),
             LastUpdatedAt = UtcNow(),
         });
 
@@ -239,6 +240,7 @@ internal sealed class ProfileRepository
         {
             ActiveProfile = string.Equals(config.ActiveProfile, profileName, StringComparison.OrdinalIgnoreCase) ? null : config.ActiveProfile,
             ProfileOrder = config.ProfileOrder?.Where(name => !string.Equals(name, profileName, StringComparison.OrdinalIgnoreCase)).ToArray(),
+            AccountOrder = config.AccountOrder?.Where(id => !string.Equals(id, AccountOrdering.Codex(profileName), StringComparison.OrdinalIgnoreCase)).ToArray(),
             LastUpdatedAt = UtcNow(),
         });
     }
@@ -284,7 +286,7 @@ internal sealed class ProfileRepository
                 NormalizeProfileNameOrNull(ReadString(node, "ActiveProfile", "active_profile", "activeProfile")),
                 ReadString(node, "LastUpdatedAt", "last_updated_at", "lastUpdatedAt"),
                 ReadBool(node, "StrictVerification", "strict_verification") ?? false,
-                ReadProfileOrder(node));
+                ReadProfileOrder(node), ReadAccountOrder(node));
         }
         catch
         {
@@ -292,6 +294,14 @@ internal sealed class ProfileRepository
         }
     }
 
+    private static string[]? ReadAccountOrder(JsonObject? node)
+    {
+        if (node?["AccountOrder"] is not JsonArray array) return null;
+        return array.OfType<JsonValue>().Select(v => v.TryGetValue<string>(out var id) ? id : null)
+            .OfType<string>().Where(id => id.Length is > 6 and <= 400 && !id.Any(char.IsControl)
+                && (id.StartsWith("codex:", StringComparison.OrdinalIgnoreCase) || id.StartsWith("provider:", StringComparison.OrdinalIgnoreCase)))
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(10000).ToArray();
+    }
     private string[]? ReadProfileOrder(JsonObject? node)
     {
         if (node?["ProfileOrder"] is not JsonArray array) return null;

@@ -41,7 +41,7 @@ La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF
 - El histórico se obtiene de `CODEX_HOME/sessions` y `archived_sessions`. No es un total de facturación ni incluye otros equipos, nube o registros eliminados antes de indexarlos. «Sin modelo» conserva consumo sin modelo identificable. La caché guarda contadores y posiciones, nunca conversaciones ni credenciales.
 - Los contadores acumulados se convierten en incrementos para evitar duplicados; cambiar de cuenta no reinicia el histórico. Archivar un archivo no lo cuenta dos veces. Las fronteras de historial heredado en forks/subagentes se excluyen cuando están presentes. Ante registros incompletos o no interpretables, el panel indica cobertura parcial.
 - Primera indexación por bloques de hasta 16 MiB / aproximadamente 1,5 s (el bloque de E/S en curso y la escritura del índice pueden finalizar después). Continúa cada 10 s mientras el panel esté visible. Se cancela al ocultarlo y se reanuda al abrirlo. Un índice completo solo se actualiza al abrir o pulsar Actualizar: no hay vigilancia continua de conversaciones en segundo plano. La caché se limita a 24 MiB y 20.000 fuentes.
-- Actualización conjunta: máximo dos consultas HTTP simultáneas, 12 s por cuenta y 60 s por lote. No cambia la cuenta activa, no abre/cierra Codex y no renueva tokens. Una sesión rechazada requiere reautenticación mediante el flujo existente. Los errores por cuenta no impiden actualizar las demás. Un 429 detiene las cuentas pendientes y respeta Retry-After (mínimo 60 s); otros lotes tienen una pausa de 15 s.
+- Actualización conjunta de Codex: máximo dos consultas HTTP simultáneas, 12 s por cuenta y 60 s por lote. No cambia la cuenta activa, no abre/cierra Codex y no renueva tokens. Una sesión rechazada requiere reautenticación mediante el flujo existente. Los errores por cuenta no impiden actualizar las demás. Un 429 detiene las cuentas pendientes y respeta Retry-After (mínimo 60 s); otros lotes tienen una pausa de 15 s.
 - Las barras muestran **porcentaje restante**. La marca vertical indica el restante esperado con reparto uniforme a lo largo de la ventana. Para la cuota semanal equivale a 100/7 ≈ 14,3 puntos porcentuales por día.
 - «≈X% al reset» y «Límite en …» extrapolan el consumo medio desde el inicio de la ventana; no son límites oficiales ni predicciones garantizadas. Se ocultan con datos antiguos, errores o al inicio de una ventana. Los resets se muestran como `Resets in Xd Xh` / `Xh Xm`; al vencer se pide actualizar sin inventar un nuevo saldo.
 - Inspiración visual: [OpenUsage](https://github.com/robinebers/openusage). Implementación propia en los controles WPF existentes, sin descargar ni ejecutar esa herramienta y sin bibliotecas de gráficos nuevas.
@@ -69,6 +69,39 @@ La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF
 - `self_serve_business_prolite` se identifica como «Business Premium». Sus observaciones semanales ya guardadas también compactan la tarjeta sin una consulta extra. Los identificadores Business genéricos no se presentan como Premium ni pierden su barra de sesión.
 - Premium cuesta 100 USD/mes con facturación anual o 125 USD/mes con facturación mensual; la consulta de cuotas no distingue la modalidad de facturación, por lo que la etiqueta muestra el nivel y no un precio supuesto. [Referencia oficial](https://help.openai.com/en/articles/8542115-chatgpt-business-general-faq).
 
+## Consulta común por proveedor (2.3.5)
+
+- Todos los porcentajes de cuotas y previsiones se muestran como enteros, igual que Codex. Los cálculos internos conservan su precisión; por ejemplo, 99,9934 % se presenta como 100 %.
+- `QuotaDisplay` es la implementación común para porcentajes, anchura de barras, posición de la referencia semanal, resets y previsión. Las tarjetas de Codex y de proveedores externos consumen el mismo resultado; las ventanas de cinco horas no muestran ritmo semanal.
+- `IQuotaProvider` adapta únicamente la consulta y normalización de cada plataforma. `QuotaQuery` comparte plazo/cancelación y valida el tipo de solicitud. El registro de proveedores comparte caché, errores, actualización y ajustes; cualquier adaptador registrado aparece automáticamente en el menú de conexión, los ajustes y el orden conjunto.
+- Solo Codex acepta perfiles guardados y permite cambiar de cuenta. Los demás adaptadores consultan su sesión actual y no muestran acciones de activación; el registro rechaza capacidades de cambio de cuenta externas. Google/Antigravity sigue siendo el único proveedor externo real implementado.
+- Sin procesos auxiliares, temporizadores ni sondeos adicionales. Los históricos siguen aislados por origen.
+
+## Orden conjunto y ritmo semanal (2.3.1)
+
+- Ajustes → Orden de las cuentas incluye Codex y los proveedores conectados, con sus logos. Sus tarjetas comparten una única lista y pueden intercalarse. El orden existente de Codex se conserva al migrar; renombrar, actualizar o cambiar de sesión no altera las posiciones. Los proveedores temporalmente desactivados conservan su posición al volver a conectarse.
+- `AccountOrder` identifica los perfiles de Codex y las sesiones actuales de proveedores por claves distintas; `ProfileOrder` mantiene la compatibilidad. Ordenar no modifica credenciales ni permite cambiar cuentas de proveedores externos.
+- La referencia recomendada y la previsión se calculan exclusivamente para ventanas semanales de 10.080 minutos. OpenAI, Antigravity y los futuros adaptadores usan la misma fórmula y presentación. Las ventanas de cinco horas solo muestran consumo y reset.
+- La raya semanal se muestra desde el comienzo de una ventana válida; la previsión mantiene la protección contra datos prematuros (primer 3 % de la semana). Datos desconocidos, vencidos o antiguos no producen marcas ni previsiones.
+- No se añaden consultas, tareas en segundo plano ni temporizadores.
+
+## Proveedores y resumen (2.3.0)
+
+- Codex conserva los perfiles, orden, cambio de cuenta, verificación, actualización conjunta y recuperación de errores. Sus credenciales y cachés mantienen el formato existente.
+- `IQuotaProvider`, `QuotaRequest`, `ProviderUsage` y `ProviderQuota` separan la consulta y el resultado común de los protocolos de cada proveedor. `QuotaQuery` aplica una cancelación/plazo común de 12 s; `CurrentProviderRegistry` registra consultas de sesiones actuales, aísla fallos y limita su concurrencia a dos. El lote manual mantiene un presupuesto global de 60 s. Un adaptador conserva el cliente y la semántica de cuotas de Codex.
+- Antigravity consulta directamente Google Cloud Code con la sesión `gemini:antigravity` del Administrador de credenciales de Windows. No necesita que la aplicación esté abierta. Si el acceso ha caducado o Google lo rechaza, se renueva mediante OAuth; los tokens derivados se conservan solo en memoria y se invalidan al cambiar/desaparecer la credencial original. No se modifica la credencial de Antigravity. Los fallos de red y 429 no provocan renovaciones. Las conexiones remotas validan TLS y rechazan redirecciones.
+- El servidor local es un respaldo si no hay credencial compatible y un complemento de hasta 2 segundos para cuotas adicionales no expuestas por Google, solo cuando coincide la identidad. El descubrimiento WMI y la tabla TCP se leen solo al actualizar, fuera del hilo de interfaz. Las solicitudes se limitan a puertos de ese proceso en `127.0.0.1`, sin proxy ni redirecciones. La excepción de certificado autofirmado se limita a HTTPS de loopback. La identidad se comprueba antes y después de leer las cuotas; sesiones diferentes no se mezclan.
+- La tarjeta reproduce Gemini semanal/5 h, Claude-GPT semanal/5 h y Gemini 4 Argon semanal cuando está disponible. Cada ventana conserva su reset y porcentaje restante. No se infiere acceso a Argon a partir del plan ni se interpreta un dato ausente como 0 o 100 %.
+- Es necesario haber iniciado sesión en Antigravity al menos una vez. No se inicia, cierra ni cambia su cuenta desde CodexManager. Si la consulta falla, se identifica la última lectura como antigua; una cuenta distinta reemplaza la lectura anterior completa. `+` permite guardar Codex o conectar Antigravity actual; Ajustes permite desactivar Antigravity. Solo Codex muestra acciones de sesión.
+- La barra superior `Hoy / Semana / Cuotas` reúne los tokens diarios, los tokens semanales y el resumen por proveedor en un mismo recuadro. La vista inicial es `Hoy`; el histórico conserva sus flechas de navegación, selección de días y desglose por modelos. La rosquilla reparte los tokens registrados de la semana natural actual (lunes a hoy) entre proveedores: un segmento por proveedor, incluyendo todos los modelos de Antigravity. No usa ni suma porcentajes de cuota; las cuotas siguen en las tarjetas de las cuentas. Los colores identifican al proveedor. Los proveedores sin uso no generan segmentos y el historial incompleto se indica como parcial.
+- Las barras diarias de tokens apilan los modelos de cada proveedor; la suma sigue siendo diaria y transversal a las cuentas. Se conservan Hoy/Semana, navegación, selección del día y modelos. Los modelos se identifican por proveedor y nombre, también en «otros modelos»: nunca se atribuyen tokens de Codex a Antigravity ni se deducen tokens de un porcentaje de cuota. El estado conserva `sin historial local` cuando falta la fuente; el desglose de modelos omite proveedores desconocidos y filas sin tokens en el periodo seleccionado.
+- Antigravity lee `~/.gemini/antigravity*/conversations/*.db`, solo `gen_metadata.data` y la fecha en `steps.metadata`, con SQLite incluido en Windows (`winsqlite3.dll`). Se extraen los campos de contabilidad protobuf, nunca se conservan mensajes. Se suman entrada, prompt de sistema, salida y caché leída. Los registros sin fecha válida no se asignan a un día ficticio. El último tramo se relee para capturar generaciones que se completan, reemplazándolas por índice en vez de sumarlas de nuevo.
+- El índice de Antigravity usa la misma retención de 365 días, caché persistente de hasta 8 MiB, hasta 1.024 fuentes/100.000 generaciones, blobs de hasta 1 MiB y bloques de lectura de 8 MiB/aproximadamente 750 ms. Las bases sin cambios no se vuelven a consultar. Cancelación y recuperación aprovechan el flujo existente del histórico; no hay vigilancia continua ni temporizadores nuevos. El tiempo de una operación SQLite/E/S en curso y la agregación/escritura pueden exceder el presupuesto suave del bloque.
+- Nuevos archivos locales: `cache/provider-antigravity.json`, `config/provider-antigravity.json`, `cache/antigravity_history.json`. No contienen CSRF ni OAuth; las cuotas incluyen únicamente métricas y metadatos de identificación visibles.
+- Claude y Cursor quedan como futuras integraciones; no se presentan como clientes ya soportados. Claude dentro de Antigravity es un grupo de cuota de Antigravity.
+- Verificación de protocolo y fuente del histórico: [documentación de Antigravity en OpenUsage](https://github.com/robinebers/openusage/blob/main/docs/providers/antigravity.md). Se ha consultado su código y el servidor local instalado, sin instalar ni ejecutar OpenUsage. Logos vectoriales con fondo transparente procedentes de sus recursos MIT: atribución/licencia en `assets/provider-icons-LICENSE.txt`. La interfaz y el código de integración Windows son propios.
+- Los endpoints y el formato de Antigravity no son una API pública estable. Si cambian, se informa de la ausencia de datos y se conserva Codex operativo.
+
 ## Gestion de perfiles
 
 - `Añadir cuenta` guarda la cuenta activa actual como perfil.
@@ -95,7 +128,7 @@ La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF
 - No guarda contrasenas.
 - No muestra el contenido de `auth.json`.
 - No registra tokens: los logs y el diario usan solamente huellas SHA-256 abreviadas o completas.
-- No implementa OAuth propio.
+- No implementa un inicio de sesión OAuth propio. Antigravity puede renovar en memoria su acceso existente para consultar cuotas con el cliente cerrado.
 - Nunca ejecuta `logout`, porque esa operacion puede revocar credenciales.
 - No rota cuentas automaticamente.
 - No cambia de cuenta al llegar a un limite.
@@ -154,7 +187,7 @@ Salida esperada:
 
 El script construye primero un apphost con la misma identidad binaria que la version
 original aceptada en este equipo y comprueba su SHA-256. Despues publica por separado
-la DLL 2.2.1 y combina ambos artefactos. Si la huella del lanzador cambia, el build se
+la DLL 2.3.5 y combina ambos artefactos. Si la huella del lanzador cambia, el build se
 detiene en lugar de instalar un ejecutable que Panda pueda bloquear.
 
 La version del SDK esta fijada en `global.json` para que el resultado sea reproducible.
@@ -168,7 +201,7 @@ instalaciones paralelas.
 - Todas las consultas de uso utilizan HTTP sin lanzar procesos auxiliares: `https://chatgpt.com/backend-api/wham/usage` o la base definida en `config.toml`.
 - Las ventanas se clasifican por `windowDurationMins`: 300 minutos para la sesion de cinco horas y 10.080 minutos para la semanal.
 - Un 401/403 al consultar consumo solo indica que el `access_token` no fue aceptado; no se interpreta como prueba de que el `refresh_token` haya sido revocado.
-- `CodexManager.exe` es solamente el apphost estable; la implementacion y su version 2.2.1 estan en `CodexManager.dll`.
+- `CodexManager.exe` es solamente el apphost estable; la implementacion y su version 2.3.5 estan en `CodexManager.dll`.
 - La huella validada del apphost es `FDB675DC32AE35AC5391835B018E52858C7253824A610FD5F4D0B65DE95FBAC1`. Se comprobo mediante creacion suspendida y mediante un arranque real sin desactivar Panda ni crear exclusiones.
 - Para distribuir el ejecutable en otros equipos sigue siendo recomendable firmarlo con un certificado de firma de codigo confiable o autorizarlo en la herramienta de seguridad correspondiente.
 

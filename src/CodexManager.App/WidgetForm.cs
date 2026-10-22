@@ -21,6 +21,10 @@ internal sealed class WidgetForm : IDisposable
     private readonly Threading.DispatcherTimer _clock;
     private DashboardState? _state;
     private readonly HistoryPanel _historyPanel;
+    private readonly ProviderOverview _overview;
+    private readonly Dictionary<string, CurrentProviderCard> _externalRows = new();
+    private readonly C.ContextMenu _addMenu = new();
+    private readonly Dictionary<string, C.CheckBox> _providerToggles = new();
     private readonly Threading.DispatcherTimer _historyTimer;
     private readonly CancellationTokenSource _lifetime = new();
     private bool _historyReading;
@@ -47,7 +51,25 @@ internal sealed class WidgetForm : IDisposable
             ?? throw new InvalidOperationException("No se encontró la interfaz de CodexManager.");
         _window = (W.Window)System.Windows.Markup.XamlReader.Load(stream);
         _historyPanel = new HistoryPanel(_theme);
-        Find<C.StackPanel>("DashboardStack").Children.Insert(0, _historyPanel);
+        _overview = new ProviderOverview(_theme, _historyPanel);
+        var dashboard = Find<C.StackPanel>("DashboardStack");
+        dashboard.Children.Insert(0, _overview);
+        AccountMenuStyle.Apply(_addMenu);
+        var codexAdd = new C.MenuItem { Header = "Guardar cuenta de Codex" };
+        codexAdd.Click += async (_, _) => await AddAsync();
+        _addMenu.Items.Add(codexAdd);
+        foreach (var provider in _service.CurrentProviders)
+        {
+            var item = new C.MenuItem { Header = "Conectar " + provider.Name + " actual" };
+            item.Click += async (_, _) => await RunAsync(async () => { await _service.SetCurrentProviderEnabledAsync(provider.Id, true); UpdateHistoryPanels(_service.History); return provider.Name + " conectado."; });
+            _addMenu.Items.Add(item);
+            var toggle = new C.CheckBox { Content = provider.Name + " · sesión actual" };
+            toggle.Click += async (_, _) =>
+            {
+                if (!_applying) await RunAsync(async () => { await _service.SetCurrentProviderEnabledAsync(provider.Id, toggle.IsChecked == true); UpdateHistoryPanels(_service.History); return "Proveedor actualizado."; });
+            };
+            _providerToggles.Add(provider.Id, toggle); Find<C.StackPanel>("ProviderToggles").Children.Add(toggle);
+        }
         _historyTimer = new Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _historyTimer.Tick += async (_, _) => { _historyTimer.Stop(); if (Visible) await UpdateHistoryAsync(); };
         _window.IsVisibleChanged += (_, _) => { if (!Visible) { _historyTimer.Stop(); _historyCancellation?.Cancel(); _clock?.Stop(); } else if (_clockEnabled) _clock?.Start(); };
@@ -62,7 +84,7 @@ internal sealed class WidgetForm : IDisposable
         };
         _window.Deactivated += (_, _) => _window.Dispatcher.BeginInvoke(() =>
         {
-            if (!IsDisposed && !_window.IsActive && !_dialogOpen && !_rows.Values.Any(r => r.MenuOpen))
+            if (!IsDisposed && !_window.IsActive && !_dialogOpen && !_addMenu.IsOpen && !_rows.Values.Any(r => r.MenuOpen))
                 HideRequested?.Invoke(this, EventArgs.Empty);
         }, Threading.DispatcherPriority.Background);
         _window.PreviewKeyDown += async (_, e) =>
@@ -72,7 +94,7 @@ internal sealed class WidgetForm : IDisposable
         };
         Click("RefreshButton", async () => await RefreshAsync());
         Click("SettingsButton", () => ShowSettings(!_settingsVisible));
-        Click("AddButton", async () => await AddAsync());
+        Click("AddButton", () => { _addMenu.PlacementTarget = Find<C.Button>("AddButton"); _addMenu.IsOpen = true; });
         Click("FolderButton", () =>
         {
             try { if (_state is not null) _service.OpenFolder(_state.DataFolder); }
@@ -126,7 +148,9 @@ internal sealed class WidgetForm : IDisposable
         _window.Background = AcrylicEnabled ? M.Brushes.Transparent : UiTheme.Brush(_theme.Base);
         _theme.Apply(_window.Resources, AcrylicEnabled);
         foreach (var row in _rows.Values) row.SetTheme(_theme);
-        _historyPanel.SetTheme(_theme);
+        _historyPanel.SetTheme(_theme); _overview.SetTheme(_theme);
+        foreach (var card in _externalRows.Values) card.SetTheme(_theme);
+        _theme.Apply(_addMenu.Resources, false); _addMenu.Background = UiTheme.Brush(_theme.Base); _addMenu.Foreground = UiTheme.Brush(_theme.Text);
     }
     public void ShowNearTray()
     {
@@ -152,7 +176,6 @@ internal sealed class WidgetForm : IDisposable
             var names = state.Profiles.Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var key in _rows.Keys.Where(key => !names.Contains(key)).ToArray())
             { var row = _rows[key]; stack.Children.Remove(row); _rows.Remove(key); row.Dispose(); }
-            var index = 0;
             foreach (var profile in state.Profiles)
             {
                 if (!_rows.TryGetValue(profile.Name, out var row))
@@ -162,14 +185,28 @@ internal sealed class WidgetForm : IDisposable
                     _rows.Add(profile.Name, row);
                 }
                 row.Update(profile, _busy);
-                if (stack.Children.IndexOf(row) != index) { stack.Children.Remove(row); stack.Children.Insert(index, row); }
-                index++;
             }
+            var others = state.OtherAccounts ?? [];
+            foreach (var old in _externalRows.Keys.Where(k => !others.Any(a => a.Provider == k)).ToArray())
+            { stack.Children.Remove(_externalRows[old]); _externalRows.Remove(old); }
+            foreach (var other in others)
+            {
+                if (!_externalRows.TryGetValue(other.Provider, out var card)) { card = new CurrentProviderCard(_theme); _externalRows[other.Provider] = card; }
+                card.Update(other);
+            }
+            var ordered = state.OrderedAccounts;
+            for (var position = 0; position < ordered.Count; position++)
+            {
+                var account = ordered[position];
+                W.UIElement card = account.Provider == ProviderIds.Codex ? _rows[account.Name] : _externalRows[account.Provider];
+                if (stack.Children.IndexOf(card) != position) { stack.Children.Remove(card); stack.Children.Insert(position, card); }
+            }
+            foreach (var provider in _service.CurrentProviders) _providerToggles[provider.Id].IsChecked = provider.Enabled;
             Find<C.CheckBox>("StrictToggle").IsChecked = state.StrictVerification;
             Find<C.CheckBox>("StartupToggle").IsChecked = _service.StartupShortcutExists();
             UpdateFooter(state);
             if (_settingsVisible) UpdateOrderList();
-            Find<C.TextBlock>("CountLabel").Text = $"{state.Profiles.Count} {(state.Profiles.Count == 1 ? "perfil" : "perfiles")}";
+            Find<C.TextBlock>("CountLabel").Text = $"{state.Profiles.Count + (state.OtherAccounts?.Count ?? 0)} cuentas";
             Find<C.TextBlock>("SettingsSummary").Text = state.SettingsSummary;
             UpdateViews();
         }
@@ -178,10 +215,12 @@ internal sealed class WidgetForm : IDisposable
     internal void ShowSettings(bool show) { _settingsVisible = show; if (show) UpdateOrderList(); UpdateViews(); }
     private void UpdateFooter(DashboardState state)
     {
-        var fresh = state.Profiles.Count(p => p.Status == "ok");
-        Find<C.TextBlock>("FooterLabel").Text = state.Profiles.Count == 0 ? "Sin cuentas guardadas" : $"{fresh}/{state.Profiles.Count} cuentas al día";
+        var total = state.Profiles.Count + (state.OtherAccounts?.Count ?? 0);
+        var fresh = state.Profiles.Count(p => p.Status == "ok") + (state.OtherAccounts?.Count(p => p.Fresh) ?? 0);
+        Find<C.TextBlock>("FooterLabel").Text = total == 0 ? "Sin cuentas guardadas" : $"{fresh}/{total} cuentas al día";
         Find<C.TextBlock>("FooterUpdated").Text = state.UpdatedLabel ?? "Sin lecturas recientes";
         var resets = state.Profiles.SelectMany(p => new[] { (p.Name, Window: p.SessionWindow), (p.Name, Window: p.WeeklyWindow) })
+            .Concat((state.OtherAccounts ?? []).SelectMany(a => a.Quotas.Select(q => (a.Name, Window: (UsageWindow?)q.Window))))
             .Where(p => p.Window?.ResetsAt > DateTimeOffset.UtcNow.ToUnixTimeSeconds() && p.Window.ResetsAt < DateTimeOffset.MaxValue.ToUnixTimeSeconds())
             .OrderBy(p => p.Window!.ResetsAt).ToArray();
         var next = Find<C.TextBlock>("FooterReset");
@@ -191,37 +230,40 @@ internal sealed class WidgetForm : IDisposable
     {
         var list = Find<C.StackPanel>("OrderList"); list.Children.Clear();
         if (_state is null) return;
-        for (var index = 0; index < _state.Profiles.Count; index++)
+        var accounts = _state.OrderedAccounts;
+        for (var index = 0; index < accounts.Count; index++)
         {
-            var name = _state.Profiles[index].Name;
+            var account = accounts[index];
+            var name = account.Provider == ProviderIds.Codex ? account.Name : ProviderIds.Name(account.Provider) + " · " + account.Name;
             var row = new C.Grid { Margin = new W.Thickness(0, 0, 0, 4) };
             row.ColumnDefinitions.Add(new C.ColumnDefinition()); row.ColumnDefinitions.Add(new C.ColumnDefinition { Width = W.GridLength.Auto }); row.ColumnDefinitions.Add(new C.ColumnDefinition { Width = W.GridLength.Auto });
-            row.Children.Add(new C.TextBlock { Text = name, VerticalAlignment = W.VerticalAlignment.Center, TextTrimming = W.TextTrimming.CharacterEllipsis });
+            row.Children.Add(new C.TextBlock { Text = name, Margin = new W.Thickness(30, 0, 5, 0), VerticalAlignment = W.VerticalAlignment.Center, TextTrimming = W.TextTrimming.CharacterEllipsis });
             for (var direction = -1; direction <= 1; direction += 2)
             {
                 var step = direction;
-                var button = new C.Button { Content = direction < 0 ? "↑" : "↓", Width = 28, MinHeight = 26, Padding = new W.Thickness(0), IsEnabled = !_busy && index + direction >= 0 && index + direction < _state.Profiles.Count };
+                var button = new C.Button { Content = direction < 0 ? "↑" : "↓", Width = 28, MinHeight = 26, Padding = new W.Thickness(0), IsEnabled = !_busy && index + direction >= 0 && index + direction < accounts.Count };
                 W.Automation.AutomationProperties.SetName(button, (direction < 0 ? "Subir " : "Bajar ") + name);
-                button.Click += async (_, _) => await MoveAccountAsync(name, step);
+                button.Click += async (_, _) => await MoveAccountAsync(account.Id, step);
                 C.Grid.SetColumn(button, direction < 0 ? 1 : 2); row.Children.Add(button);
             }
+            var logo = ProviderIcons.Create(account.Provider, _theme); logo.HorizontalAlignment = W.HorizontalAlignment.Left; row.Children.Add(logo);
             list.Children.Add(row);
         }
     }
     private async Task MoveAccountAsync(string name, int direction)
     {
         if (_busy || _state is null) return;
-        var names = _state.Profiles.Select(p => p.Name).ToArray();
+        var names = _state.OrderedAccounts.Select(p => p.Id).ToArray();
         var index = Array.FindIndex(names, n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
         var next = index + direction;
         if (index < 0 || next < 0 || next >= names.Length) return;
         (names[index], names[next]) = (names[next], names[index]);
-        await RunAsync(async () => { await _service.SetProfileOrderAsync(names); return "Orden guardado."; });
+        await RunAsync(async () => { await _service.SetAccountOrderAsync(names); return "Orden guardado."; });
     }
     private void UpdateViews()
     {
         Find<C.ScrollViewer>("AccountsScroll").Visibility = !_settingsVisible ? W.Visibility.Visible : W.Visibility.Collapsed;
-        Find<C.StackPanel>("EmptyPanel").Visibility = !_settingsVisible && _rows.Count == 0 ? W.Visibility.Visible : W.Visibility.Collapsed;
+        Find<C.StackPanel>("EmptyPanel").Visibility = !_settingsVisible && _rows.Count == 0 && _externalRows.Count == 0 ? W.Visibility.Visible : W.Visibility.Collapsed;
         Find<C.ScrollViewer>("SettingsScroll").Visibility = _settingsVisible ? W.Visibility.Visible : W.Visibility.Collapsed;
         Find<C.TextBlock>("SectionLabel").Text = _settingsVisible ? "PREFERENCIAS" : "ACTIVIDAD Y CUENTAS";
         Find<C.TextBlock>("CountLabel").Visibility = _settingsVisible ? W.Visibility.Collapsed : W.Visibility.Visible;
@@ -232,6 +274,7 @@ internal sealed class WidgetForm : IDisposable
     {
         _busy = busy;
         foreach (var name in new[] { "AddButton", "RefreshButton", "FileModeButton", "StartupToggle", "StrictToggle" }) Find<C.Control>(name).IsEnabled = !busy;
+        foreach (var toggle in _providerToggles.Values) toggle.IsEnabled = !busy;
         foreach (var row in _rows.Values) row.SetBusy(busy);
         Find<C.StackPanel>("OrderList").IsEnabled = !busy;
     }
@@ -287,7 +330,8 @@ internal sealed class WidgetForm : IDisposable
         try { return await _service.RefreshAllUsageAsync(null, _lifetime.Token); }
         finally { await history; }
     }, showDialogOnError: false);
-    internal void SetHistoryPreview(TokenHistorySnapshot snapshot) => _historyPanel.Update(snapshot);
+    private void UpdateHistoryPanels(TokenHistorySnapshot snapshot) { _historyPanel.Update(snapshot); _overview.Update(snapshot); }
+    internal void SetHistoryPreview(TokenHistorySnapshot snapshot) => UpdateHistoryPanels(snapshot);
     private async Task UpdateHistoryAsync()
     {
         if (_historyReading || IsDisposed) return;
@@ -297,13 +341,13 @@ internal sealed class WidgetForm : IDisposable
         try
         {
             var snapshot = await _service.RefreshHistoryAsync(cancellation.Token);
-            if (!IsDisposed) { _historyPanel.Update(snapshot); if (Visible && snapshot.CatchingUp) _historyTimer.Start(); }
+            if (!IsDisposed) { UpdateHistoryPanels(snapshot); if (Visible && snapshot.CatchingUp) _historyTimer.Start(); }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             _service.Diagnostics.Write("widget.history", ex);
-            try { if (!IsDisposed) _historyPanel.ShowReadError(); }
+            try { if (!IsDisposed) UpdateHistoryPanels(_service.History with { Partial = true, Error = "No se pudo leer el historial local." }); }
             catch (Exception displayError) { ReportRefreshFailure("widget.history-error-display", displayError); }
         }
         finally { _historyReading = false; _historyCancellation = null; if (!IsDisposed && Visible && cancellation.IsCancellationRequested) _historyTimer.Start(); }
@@ -379,7 +423,7 @@ internal sealed class WidgetForm : IDisposable
     public void Dispose()
     {
         if (IsDisposed) return;
-        IsDisposed = true; _lifetime.Cancel(); _historyTimer.Stop(); _clock.Stop(); _source?.RemoveHook(WindowMessage);
+        IsDisposed = true; _addMenu.IsOpen = false; _addMenu.Items.Clear(); _lifetime.Cancel(); _historyTimer.Stop(); _clock.Stop(); _source?.RemoveHook(WindowMessage);
         foreach (var row in _rows.Values) row.Dispose(); _rows.Clear(); _window.Close(); _lifetime.Dispose();
     }
 }
@@ -388,6 +432,7 @@ internal sealed class AccountRow : C.Border, IDisposable
 {
     private UiTheme _theme;
     private ProfileState? _profile;
+    private readonly C.ContentControl _logo = new();
     private readonly C.TextBlock _plan = Text(9.5, true);
     private readonly C.Border _planBadge = new() { CornerRadius = new W.CornerRadius(4), Padding = new W.Thickness(5, 2, 5, 2), Margin = new W.Thickness(6, 0, 0, 0), VerticalAlignment = W.VerticalAlignment.Center };
     private readonly C.StackPanel[] _quotaSections = [new(), new()];
@@ -416,7 +461,8 @@ internal sealed class AccountRow : C.Border, IDisposable
         _name.VerticalAlignment = W.VerticalAlignment.Center; title.Children.Add(_name);
         _planBadge.Child = _plan; C.Grid.SetColumn(_planBadge, 1); title.Children.Add(_planBadge);
         identity.Children.Add(title); identity.Children.Add(_email); _email.Margin = new W.Thickness(0, 2, 0, 0);
-        header.Children.Add(identity);
+        var identityWithLogo = new C.DockPanel(); identityWithLogo.Children.Add(_logo); identityWithLogo.Children.Add(identity);
+        header.Children.Add(identityWithLogo);
         var status = new C.StackPanel { Margin = new W.Thickness(6, 0, 9, 0), VerticalAlignment = W.VerticalAlignment.Center };
         _badge.HorizontalAlignment = _updated.HorizontalAlignment = W.HorizontalAlignment.Right; status.Children.Add(_badge); status.Children.Add(_updated); status.Children.Add(_activate);
         C.Grid.SetColumn(status, 1); header.Children.Add(status); C.Grid.SetColumn(_more, 2); header.Children.Add(_more); stack.Children.Add(header);
@@ -449,7 +495,7 @@ internal sealed class AccountRow : C.Border, IDisposable
     private static C.TextBlock Text(double size, bool bold = false) => new() { FontSize = size, FontWeight = bold ? W.FontWeights.SemiBold : W.FontWeights.Normal, TextTrimming = W.TextTrimming.CharacterEllipsis };
     public void SetTheme(UiTheme theme)
     {
-        _theme = theme; _email.Foreground = _updated.Foreground = UiTheme.Brush(theme.Muted); _notice.Foreground = UiTheme.Brush(theme.Warning);
+        _theme = theme; _logo.Content = ProviderIcons.Create(ProviderIds.Codex, theme); _email.Foreground = _updated.Foreground = UiTheme.Brush(theme.Muted); _notice.Foreground = UiTheme.Brush(theme.Warning);
         theme.Apply(_menu.Resources, false);
         _menu.Background = UiTheme.Brush(theme.Base); _menu.Foreground = UiTheme.Brush(theme.Text);
         foreach (var text in _reset) text.Foreground = UiTheme.Brush(theme.Muted);
@@ -472,38 +518,28 @@ internal sealed class AccountRow : C.Border, IDisposable
         W.Automation.AutomationProperties.SetName(_activate, "Activar " + p.Name); _delete.IsEnabled = !p.IsActive;
         Background = UiTheme.Brush(_theme.Dark ? M.Colors.White : M.Colors.Black, p.IsActive ? (byte)17 : (byte)10);
         BorderBrush = UiTheme.Brush(p.IsActive ? _theme.Accent : _theme.Text, p.IsActive ? (byte)35 : (byte)0);
-        var values = new[] { p.SessionRemainingPercent, p.WeeklyRemainingPercent }; var resets = new[] { p.SessionResetLabel, p.WeeklyResetLabel };
-        for (var i = 0; i < 2; i++)
-        {
-            _percent[i].Text = values[i] is double v ? $"{v:0}% restante" : "Sin datos";
-            var window = i == 0 ? p.SessionWindow : p.WeeklyWindow;
-            _reset[i].Text = window is not null ? UsagePresentation.Countdown(window.ResetsAt, DateTimeOffset.UtcNow) : resets[i];
-            SetFill(i);
-        }
+        for (var i = 0; i < 2; i++) SetFill(i);
         _notice.Visibility = p.Status is "error" or "stale" ? W.Visibility.Visible : W.Visibility.Collapsed;
         _notice.Text = p.Status == "error" ? "No se pudo actualizar · " + p.Error : "Datos antiguos · " + p.UpdatedLabel;
         SetBusy(busy);
     }
     private void SetFill(int index)
     {
-        var value = index == 0 ? _profile?.SessionRemainingPercent : _profile?.WeeklyRemainingPercent;
-        _fills[index].Width = Math.Max(0, _tracks[index].ActualWidth * Math.Clamp(value ?? 0, 0, 100) / 100);
+        var remaining = index == 0 ? _profile?.SessionRemainingPercent : _profile?.WeeklyRemainingPercent;
+        var window = index == 0 ? _profile?.SessionWindow : _profile?.WeeklyWindow;
+        var display = QuotaDisplay.Create(window, remaining, _profile?.Status == "ok", DateTimeOffset.UtcNow);
+        _percent[index].Text = display.RemainingText + (remaining.HasValue ? " restante" : "");
+        _reset[index].Text = display.ResetText ?? (index == 0 ? _profile?.SessionResetLabel : _profile?.WeeklyResetLabel) ?? "Sin fecha";
+        _fills[index].Width = display.FillWidth(_tracks[index].ActualWidth);
         var color = index == 0 ? _theme.Accent : _theme.WeeklyAccent;
         _fills[index].Background = _percent[index].Foreground = UiTheme.Brush(color);
-        var window = index == 0 ? _profile?.SessionWindow : _profile?.WeeklyWindow;
-        var pace = window is not null && _profile?.Status == "ok" ? QuotaPace.Calculate(window, DateTimeOffset.UtcNow) : null;
-        _markers[index].Visibility = pace is null ? W.Visibility.Collapsed : W.Visibility.Visible;
+        _markers[index].Visibility = display.Reference is null ? W.Visibility.Collapsed : W.Visibility.Visible;
+        if (display.Reference is not null) _markers[index].Margin = new W.Thickness(display.MarkerOffset(_tracks[index].ActualWidth), -2, 0, -2);
         _markers[index].Background = UiTheme.Brush(_theme.Text, 170);
-        _forecast[index].Text = "";
-        if (pace is not null)
-        {
-            _markers[index].Margin = new W.Thickness(Math.Max(0, (_tracks[index].ActualWidth - 2) * pace.ExpectedRemaining / 100), -2, 0, -2);
-            _forecast[index].Foreground = UiTheme.Brush(pace.ProjectedUsed > 100 ? _theme.Warning : _theme.Muted);
-            _forecast[index].Text = pace.ProjectedUsed > 100 && pace.SecondsToEmpty is double seconds
-                ? "⚠ Límite en " + UsagePresentation.Duration(seconds)
-                : $"≈{Math.Max(0, 100 - pace.ProjectedUsed):0}% al reset";
-        }
+        _forecast[index].Text = display.ForecastText;
+        _forecast[index].Foreground = UiTheme.Brush(display.AtRisk ? _theme.Warning : _theme.Muted);
     }
+
     public void SetBusy(bool busy) { _activate.IsEnabled = _more.IsEnabled = !busy; if (busy) _menu.IsOpen = false; }
     public void Dispose()
     {

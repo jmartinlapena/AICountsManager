@@ -175,12 +175,12 @@ internal static partial class Program
             form.Visual.Topmost = false; form.Visual.Left = -20000; form.Visual.Top = -20000;
             form.Visual.Height = 710; form.ApplyState(SampleState()); form.SetHistoryPreview(SampleHistory()); form.Visual.Show(); form.Visual.UpdateLayout();
             Save(form.Visual, Path.Combine(output, dark ? "interfaz-oscura.png" : "interfaz-clara.png"));
-            var history = (HistoryPanel)((System.Windows.Controls.StackPanel)form.Visual.FindName("DashboardStack")).Children[0];
-            UiClick(UiField<System.Windows.Controls.Button>(history, "_week"));
+            var history = UiField<HistoryPanel>(form, "_historyPanel");
+            UiClick(UiField<System.Windows.Controls.Button>(UiField<ProviderOverview>(form, "_overview"), "_week"));
             UiClick((System.Windows.Controls.Button)UiField<System.Windows.Controls.Grid>(history, "_chart").Children[0]);
             form.Visual.UpdateLayout();
             Save(form.Visual, Path.Combine(output, dark ? "dia-seleccionado-oscuro.png" : "dia-seleccionado-claro.png"));
-            UiClick(UiField<System.Windows.Controls.Button>(history, "_today"));
+            UiClick(UiField<System.Windows.Controls.Button>(UiField<ProviderOverview>(form, "_overview"), "_today"));
             var menu = (System.Windows.Controls.ContextMenu)typeof(AccountRow).GetField("_menu", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(form.Rows.First())!;
             menu.PlacementTarget = form.Rows.First(); menu.IsOpen = true;
             form.Visual.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);

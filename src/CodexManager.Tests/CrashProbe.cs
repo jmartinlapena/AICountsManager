@@ -7,7 +7,7 @@ namespace CodexManager.Tests;
 
 internal static partial class Program
 {
-    private static Task ProbeTrayRefreshAsync(bool liveHistory = false, bool liveQuotas = false) => InTemporaryStoreAsync(async paths =>
+    private static Task ProbeTrayRefreshAsync(bool liveHistory = false, bool liveQuotas = false, bool antigravity = false) => InTemporaryStoreAsync(async paths =>
     {
         var accounts = Enumerable.Range(0, 3).Select(i => (Name: "Account" + i, Snapshot: Snapshot("u"+i,"a"+i,"w","g",1700000000))).ToArray();
         SeedProfiles(paths, accounts[0].Snapshot, accounts);
@@ -33,7 +33,7 @@ internal static partial class Program
             try
             {
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
-                using var service = new CodexManagerService(paths, liveQuotas ? new CodexProcessController() : new FakeProcessController(false), new NoPollingAppServer(), client, false);
+                using var service = new CodexManagerService(paths, liveQuotas ? new CodexProcessController() : new FakeProcessController(false), new NoPollingAppServer(), client, false, antigravity ? AntigravityCloudProvider.Create() : null);
                 tray = new TrayApplicationContext(service);
                 var dispatcher = UiField<Control>(tray, "_dispatcher");
                 dispatcher.BeginInvoke(async () =>
@@ -43,6 +43,7 @@ internal static partial class Program
                         await Task.Delay(300);
                         tray.ToggleWidget();
                         var form = UiField<WidgetForm>(tray, "_widget");
+                        ((C.TextBlock)form.Visual.FindName("TitleLabel")).Text = "Prueba · datos ficticios";
                         var button = (C.Button)form.Visual.FindName("RefreshButton");
                         form.SetHistoryPreview(SampleHistory());
                         form.Visual.Dispatcher.UnhandledException += (_, e) => Console.Error.WriteLine("DISPATCHER: " + e.Exception);
@@ -61,6 +62,12 @@ internal static partial class Program
                             if (i % 3 == 0) { form.Hide(); await Task.Delay(10); tray.ToggleWidget(); }
                             await EventuallyAsync(() => Task.FromResult(button.IsEnabled));
                             Console.WriteLine($"REFRESH {i} visible={form.Visible} context={SynchronizationContext.Current?.GetType().Name}");
+                        }
+                        if (antigravity)
+                        {
+                            var account = service.BuildDashboardState().OtherAccounts!.Single();
+                            Check(account.Fresh ? account.Quotas.Count >= 4 : account.Status == "error" && !string.IsNullOrWhiteSpace(account.Error), "Provider is neither ready nor reporting unavailability.");
+                            Console.WriteLine("LIVE ANTIGRAVITY status=" + account.Status + " limits=" + account.Quotas.Count);
                         }
                         completed = true;
                     }
