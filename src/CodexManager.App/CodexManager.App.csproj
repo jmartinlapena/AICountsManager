@@ -3,17 +3,22 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net9.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>CodexManager</AssemblyName>
     <RootNamespace>CodexManager</RootNamespace>
-    <Version>2.0.1</Version>
+    <Version>2.2.4</Version>
     <UseAppHost>false</UseAppHost>
     <PublishSingleFile>false</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
 
   <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+    <Page Remove="WidgetWindow.xaml" />
+    <EmbeddedResource Include="WidgetWindow.xaml" />
     <Content Include="..\..\assets\icon.ico">
       <Link>assets\icon.ico</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

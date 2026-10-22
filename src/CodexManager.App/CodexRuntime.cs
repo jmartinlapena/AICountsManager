@@ -349,11 +349,15 @@ internal sealed class CodexAppServerClient : ICodexAppServerClient
         }
 
         var classified = UsageWindowClassifier.Classify(windows);
+        var plan = AccountPlan.Read(preferred?["planType"]);
 
         return new UsageRecord
         {
             CheckedAt = DateTimeOffset.UtcNow.ToString("O"),
             Status = "ok",
+            PlanType = plan,
+            SessionLimitNotApplicable = (preferred?["primary"] is not null || preferred?["secondary"] is not null)
+                && AccountPlan.IsWeeklyOnlyPlan(plan, windows),
             Session = classified.Session,
             Weekly = classified.Weekly,
         };

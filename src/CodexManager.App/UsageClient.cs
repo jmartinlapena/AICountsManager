@@ -10,6 +10,7 @@ internal interface IUsageClient
 
 internal sealed class UsageClient : IUsageClient
 {
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
     public async Task<UsageRecord> ReadAsync(
         AuthSnapshot snapshot,
         string codexConfigPath,
@@ -21,7 +22,6 @@ internal sealed class UsageClient : IUsageClient
         }
 
         var url = $"{ResolveChatGptBaseUrl(codexConfigPath)}/wham/usage";
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", snapshot.AccessToken);
         request.Headers.UserAgent.ParseAdd("CodexManager");
@@ -31,15 +31,18 @@ internal sealed class UsageClient : IUsageClient
             request.Headers.Add("ChatGPT-Account-Id", snapshot.AccountId);
         }
 
-        using var response = await http.SendAsync(request, cancellationToken);
+        using var response = await Http.SendAsync(request, cancellationToken);
         if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
         {
             return UsageRecord.FromError(
-                $"El access_token no fue aceptado ({(int)response.StatusCode}). Esto no confirma que el refresh_token este revocado.");
+                $"La sesión guardada no fue aceptada ({(int)response.StatusCode}). Activa esta cuenta e inicia sesión de nuevo si es necesario.") with { HttpStatus = (int)response.StatusCode };
         }
         if (!response.IsSuccessStatusCode)
         {
-            return UsageRecord.FromError($"La consulta de limites devolvio {(int)response.StatusCode}.");
+            var retry = response.Headers.RetryAfter;
+            var seconds = retry?.Delta?.TotalSeconds ?? (retry?.Date - DateTimeOffset.UtcNow)?.TotalSeconds ?? 60;
+            return UsageRecord.FromError($"La consulta de límites devolvió {(int)response.StatusCode}.") with
+            { HttpStatus = (int)response.StatusCode, RetryAfterSeconds = (int)Math.Clamp(seconds, 1, 86400) };
         }
 
         var json = JsonNode.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
@@ -54,12 +57,15 @@ internal sealed class UsageClient : IUsageClient
         AddWhamWindow(rateLimit?["secondary_window"], windows);
 
         var classified = UsageWindowClassifier.Classify(windows);
+        var plan = AccountPlan.Read(root?["plan_type"]);
 
         return new UsageRecord
         {
             CheckedAt = DateTimeOffset.UtcNow.ToString("O"),
             Status = "ok",
             Email = root?["email"]?.GetValue<string?>(),
+            PlanType = plan,
+            SessionLimitNotApplicable = AccountPlan.IsWeeklyOnlyPlan(plan, windows),
             Session = classified.Session,
             Weekly = classified.Weekly,
         };

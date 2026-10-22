@@ -36,6 +36,8 @@ internal static class UsageWindowClassifier
         {
             Session = classified.Session,
             Weekly = classified.Weekly,
+            SessionLimitNotApplicable = (usage.SessionLimitNotApplicable || usage.PlanType == "self_serve_business_prolite")
+                && AccountPlan.IsWeeklyOnlyPlan(usage.PlanType, new[] { usage.Session, usage.Weekly }.Where(HasData).ToArray()),
         };
     }
 

@@ -5,10 +5,38 @@ using CodexManager;
 
 namespace CodexManager.Tests;
 
-internal static class Program
+internal static partial class Program
 {
     private static readonly (string Name, Func<Task> Run)[] Tests =
     [
+        ("refresh survives final storage read failure and retries", RefreshStorageFailureAsync),
+        ("posted tray notification contains storage failures", TrayPostedFailureAsync),
+        ("disposing flyout cancels pending refresh safely", RefreshDisposalAsync),
+        ("diagnostics are bounded and exclude exception messages", BoundedDiagnosticsAsync),
+        ("history day selection preserves chart and updates exact totals/models", HistoryDaySelectionAsync),
+        ("Business Premium uses actual tier and migrates cached quota applicability", BusinessPremiumAsync),
+        ("quiet refresh retains cooldown/footer/errors without hover annotations", QuietRefreshUiAsync),
+        ("plan labels and weekly-only Pro normalization", PlanNormalizationAsync),
+        ("missing or ambiguous quotas do not imply unlimited sessions", MissingSessionIsNotUnlimitedAsync),
+        ("plans survive cache, errors and dashboard updates", PlanCacheAndDashboardAsync),
+        ("app-server preserves plan and session applicability", AppServerPlanAsync),
+        ("plan badges fit and reused cards collapse and restore session", CompactPlanCardAsync),
+        ("custom account order survives CRUD and switching", AccountOrderPersistsAsync),
+        ("settings arrows reorder visible accounts", UiAccountOrderAsync),
+        ("tray creates flyout only on demand and reopens correctly", TrayLazyFlyoutAsync),
+        ("background strict polling stays read-only and lightweight", StrictPollingStaysLightAsync),
+        ("UI refresh, history, settings and reopen flows", UiRefreshAndHistoryAsync),
+        ("history incremental, models, restart and archive", HistoryIncrementalAsync),
+        ("history partial lines and truncation", HistoryPartialLineAsync),
+        ("history excludes inherited fork and subagent counters", HistoryInheritedAsync),
+        ("history respects byte budget and oversized records", HistoryBudgetAsync),
+        ("history handles malformed cache and token values", HistoryMalformedAsync),
+        ("history local dates and calendar weeks", HistoryCalendarAsync),
+        ("quota pace, daily budget and countdown", PaceAndCountdownAsync),
+        ("bulk refresh bounded, read-only and isolated failures", BulkRefreshAsync),
+        ("bulk refresh obeys rate limits", BulkRateLimitAsync),
+        ("bulk cancellation and overlapping refresh", BulkCancellationAsync),
+        ("history incremental performance", HistoryBenchmarkAsync),
         ("identity and generation", IdentityAndGenerationAsync),
         ("repository rejects credential downgrade", RepositoryRejectsDowngradeAsync),
         ("equal timestamp rotation is captured", EqualTimestampRotationIsCapturedAsync),
@@ -21,10 +49,44 @@ internal static class Program
         ("usage refresh is credential read-only", UsageRefreshIsCredentialReadOnlyAsync),
         ("usage windows are classified by duration", UsageWindowsAreClassifiedByDurationAsync),
         ("transaction journal reconciles installed target", JournalRecoveryAsync),
+        ("profile names cannot escape or alias directories", ProfileNamesAreSafeAsync),
+        ("metadata cannot select a different profile", MetadataNameIsNotAuthoritativeAsync),
+        ("failed verification restores missing auth", MissingAuthRollbackAsync),
+        ("verification exception restores missing auth", MissingAuthExceptionRollbackAsync),
+        ("profile actions complete on WinForms UI thread", UiProfileActionsAsync),
+        ("expired cached window is unknown instead of full", ExpiredUsageIsUnknownAsync),
+        ("usage errors preserve last successful observation", UsageErrorsPreserveObservationAsync),
+        ("file mode is written outside TOML tables", FileModeIsRootSettingAsync),
+        ("cards are reused and removed controls disposed", UiCardLifetimeAsync),
     ];
 
     public static async Task<int> Main(string[] args)
     {
+        if (args is ["--probe-refresh-storage-failure"]) { await RefreshStorageFailureAsync(); return 0; }
+        if (args is ["--probe-tray-refresh-live-quota"]) { await ProbeTrayRefreshAsync(true, true); return 0; }
+        if (args is ["--probe-tray-refresh-live-history"]) { await ProbeTrayRefreshAsync(true); return 0; }
+        if (args is ["--probe-tray-refresh"]) { await ProbeTrayRefreshAsync(); return 0; }
+        if (args is ["--measure-ui", var resourceOutput]) { await MeasureUiResourcesAsync(resourceOutput); return 0; }
+        if (args is ["--benchmark-history", var home, var cache])
+        {
+            var scanner = new TokenHistory(home, cache);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var result = await scanner.RefreshAsync();
+            Console.WriteLine($"LOCAL HISTORY elapsed={watch.ElapsedMilliseconds}ms bytes={scanner.LastBytesRead} days={result.Days.Count} partial={result.Partial} catchingUp={result.CatchingUp} error={result.Error}");
+            watch.Restart(); result = await scanner.RefreshAsync();
+            Console.WriteLine($"NEXT PASS elapsed={watch.ElapsedMilliseconds}ms bytes={scanner.LastBytesRead} days={result.Days.Count} partial={result.Partial} catchingUp={result.CatchingUp} error={result.Error}");
+            return 0;
+        }
+        if (args is ["--preview-ui"])
+        {
+            await PreviewUiAsync();
+            return 0;
+        }
+        if (args is ["--render-ui", var output])
+        {
+            await RenderUiAsync(output);
+            return 0;
+        }
         if (args is ["--validate-live-readonly"])
         {
             return await ValidateLiveStoreReadOnlyAsync();

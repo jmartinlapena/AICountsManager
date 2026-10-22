@@ -86,7 +86,8 @@ internal sealed record CodexBinaryStatus(bool Available, string? Path, string Me
 internal sealed record AppConfig(
     string? ActiveProfile,
     string? LastUpdatedAt,
-    bool StrictVerification = false);
+    bool StrictVerification = false,
+    IReadOnlyList<string>? ProfileOrder = null);
 
 internal sealed record ProfileMeta(
     string Name,
@@ -102,10 +103,14 @@ internal sealed record UsageWindow(double? UsedPercent, int? WindowDurationMins,
 
 internal sealed record UsageRecord
 {
+    public int? HttpStatus { get; init; }
+    public int? RetryAfterSeconds { get; init; }
     public string? CheckedAt { get; init; }
     public string Status { get; init; } = "never_checked";
     public string? Error { get; init; }
     public string? Email { get; init; }
+    public string? PlanType { get; init; }
+    public bool SessionLimitNotApplicable { get; init; }
     public UsageWindow Session { get; init; } = new(null, null, null);
     public UsageWindow Weekly { get; init; } = new(null, null, null);
 
@@ -133,7 +138,11 @@ internal sealed record ProfileState(
     string UpdatedLabel,
     string Status,
     string? Error,
-    string? Email);
+    string? Email,
+    UsageWindow? SessionWindow = null,
+    UsageWindow? WeeklyWindow = null,
+    string? PlanType = null,
+    bool SessionLimitNotApplicable = false);
 
 internal sealed record DashboardState(
     ProfileState ActiveProfile,
@@ -142,7 +151,8 @@ internal sealed record DashboardState(
     string DataFolder,
     string LogsFolder,
     bool StrictVerification,
-    bool CodexRunning);
+    bool CodexRunning,
+    string? UpdatedLabel = null);
 
 internal enum SwitchProfileStatus
 {

@@ -21,9 +21,19 @@ internal sealed class ProfileRepository
     public IReadOnlyList<ProfileMeta> ListProfiles()
     {
         Directory.CreateDirectory(_paths.AccountsDir);
+        var config = LoadAppConfig();
+        var order = config.ProfileOrder ?? [];
         return Directory.GetDirectories(_paths.AccountsDir)
+            .Where(directory => NormalizeProfileNameOrNull(Path.GetFileName(directory)) is not null
+                && (File.GetAttributes(directory) & FileAttributes.ReparsePoint) == 0)
             .Select(directory => LoadMeta(Path.GetFileName(directory)!))
-            .OrderBy(profile => profile.Name, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(profile =>
+            {
+                if (order.Count == 0) return string.Equals(profile.Name, config.ActiveProfile, StringComparison.OrdinalIgnoreCase) ? -1 : 0;
+                for (var i = 0; i < order.Count; i++) if (string.Equals(order[i], profile.Name, StringComparison.OrdinalIgnoreCase)) return i;
+                return int.MaxValue;
+            })
+            .ThenBy(profile => profile.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
@@ -194,10 +204,12 @@ internal sealed class ProfileRepository
         Directory.Move(currentDirectory, newDirectory);
         SaveMeta(newName, LoadMeta(newName) with { Name = newName, UpdatedAt = UtcNow() });
         var appConfig = LoadAppConfig();
-        if (string.Equals(appConfig.ActiveProfile, currentName, StringComparison.OrdinalIgnoreCase))
+        SaveAppConfig(appConfig with
         {
-            SaveAppConfig(appConfig with { ActiveProfile = newName, LastUpdatedAt = UtcNow() });
-        }
+            ActiveProfile = string.Equals(appConfig.ActiveProfile, currentName, StringComparison.OrdinalIgnoreCase) ? newName : appConfig.ActiveProfile,
+            ProfileOrder = appConfig.ProfileOrder?.Select(name => string.Equals(name, currentName, StringComparison.OrdinalIgnoreCase) ? newName : name).ToArray(),
+            LastUpdatedAt = UtcNow(),
+        });
 
         var cache = LoadUsageCache();
         if (cache.Accounts.Remove(currentName, out var usage))
@@ -223,10 +235,12 @@ internal sealed class ProfileRepository
         SaveUsageCache(cache);
 
         var config = LoadAppConfig();
-        if (string.Equals(config.ActiveProfile, profileName, StringComparison.OrdinalIgnoreCase))
+        SaveAppConfig(config with
         {
-            SaveAppConfig(config with { ActiveProfile = null, LastUpdatedAt = UtcNow() });
-        }
+            ActiveProfile = string.Equals(config.ActiveProfile, profileName, StringComparison.OrdinalIgnoreCase) ? null : config.ActiveProfile,
+            ProfileOrder = config.ProfileOrder?.Where(name => !string.Equals(name, profileName, StringComparison.OrdinalIgnoreCase)).ToArray(),
+            LastUpdatedAt = UtcNow(),
+        });
     }
 
     public ProfileMeta LoadMeta(string profileName)
@@ -242,7 +256,7 @@ internal sealed class ProfileRepository
         {
             var node = JsonNode.Parse(File.ReadAllBytes(metaPath))?.AsObject();
             return new ProfileMeta(
-                Name: NormalizeProfileNameOrNull(ReadString(node, "Name", "profile_name", "name")) ?? profileName,
+                Name: profileName, // Directory names are authoritative; metadata never selects another path.
                 CreatedAt: ReadString(node, "CreatedAt", "created_at"),
                 UpdatedAt: ReadString(node, "UpdatedAt", "updated_at"),
                 SourceCodexHome: ReadString(node, "SourceCodexHome", "source_codex_home") ?? _paths.CodexHome,
@@ -269,12 +283,20 @@ internal sealed class ProfileRepository
             return new AppConfig(
                 NormalizeProfileNameOrNull(ReadString(node, "ActiveProfile", "active_profile", "activeProfile")),
                 ReadString(node, "LastUpdatedAt", "last_updated_at", "lastUpdatedAt"),
-                ReadBool(node, "StrictVerification", "strict_verification") ?? false);
+                ReadBool(node, "StrictVerification", "strict_verification") ?? false,
+                ReadProfileOrder(node));
         }
         catch
         {
             return new AppConfig(null, null);
         }
+    }
+
+    private string[]? ReadProfileOrder(JsonObject? node)
+    {
+        if (node?["ProfileOrder"] is not JsonArray array) return null;
+        return array.OfType<JsonValue>().Select(value => value.TryGetValue<string>(out var name) ? NormalizeProfileNameOrNull(name) : null)
+            .OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).Take(10000).ToArray();
     }
 
     public void SaveAppConfig(AppConfig config) =>
@@ -310,6 +332,8 @@ internal sealed class ProfileRepository
                     Error = ReadString(usage, "Error", "error"),
                     Email = ReadString(usage, "Email", "email")
                         ?? usage["account"]?["email"]?.GetValue<string?>(),
+                    PlanType = ReadString(usage, "PlanType", "plan_type"),
+                    SessionLimitNotApplicable = ReadBool(usage, "SessionLimitNotApplicable", "session_limit_not_applicable") ?? false,
                     Session = ReadUsageWindow(usage["Session"] ?? usage["session"] ?? usage["rateLimits"]?["primary"]),
                     Weekly = ReadUsageWindow(usage["Weekly"] ?? usage["weekly"] ?? usage["rateLimits"]?["secondary"]),
                 });
@@ -325,7 +349,10 @@ internal sealed class ProfileRepository
     public void SaveUsage(string profileName, UsageRecord usage)
     {
         var cache = LoadUsageCache();
-        cache.Accounts[SanitizeProfileName(profileName)] = usage;
+        profileName = SanitizeProfileName(profileName);
+        if (usage.Status == "error" && cache.Accounts.TryGetValue(profileName, out var previous))
+            usage = previous with { Status = "error", Error = usage.Error };
+        cache.Accounts[profileName] = usage;
         SaveUsageCache(cache);
     }
 
@@ -414,12 +441,14 @@ internal sealed class ProfileRepository
 
     public string SanitizeProfileName(string name)
     {
-        var value = name.Trim();
+        var value = (name ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(value))
         {
             throw new InvalidOperationException("El nombre del perfil no puede estar vacio.");
         }
-        if (!Regex.IsMatch(value, @"^[A-Za-z0-9._ -]{1,64}$"))
+        if (!Regex.IsMatch(value, @"^[\p{L}\p{N}._ -]{1,64}$")
+            || value is "." or ".." || value.EndsWith('.')
+            || Regex.IsMatch(value, @"^(CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])(?:\.|$)", RegexOptions.IgnoreCase))
         {
             throw new InvalidOperationException("El nombre del perfil contiene caracteres no permitidos.");
         }
@@ -470,8 +499,15 @@ internal sealed class ProfileRepository
         AtomicFile.WriteBytes(backupPath, content);
     }
 
-    private string GetProfileDir(string profileName) =>
-        Path.Combine(_paths.AccountsDir, SanitizeProfileName(profileName));
+    private string GetProfileDir(string profileName)
+    {
+        var root = Path.GetFullPath(_paths.AccountsDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var candidate = Path.GetFullPath(Path.Combine(root, SanitizeProfileName(profileName)));
+        if (!candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+            || (Directory.Exists(candidate) && (File.GetAttributes(candidate) & FileAttributes.ReparsePoint) != 0))
+            throw new InvalidOperationException("La carpeta del perfil debe permanecer dentro de accounts y no puede ser un enlace.");
+        return candidate;
+    }
 
     private string? NormalizeProfileNameOrNull(string? value)
     {

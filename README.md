@@ -2,7 +2,7 @@
 
 Widget nativo de Windows para ver y cambiar perfiles de Codex desde la bandeja del sistema.
 
-La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrecer un popover ligero en la bandeja, sin una ventana clasica fija en la barra de tareas, para alternar entre varias sesiones locales de Codex guardadas como perfiles.
+La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF dibuja el panel translúcido. Permite alternar entre sesiones locales de Codex sin una ventana permanente en la barra de tareas.
 
 ## Requisitos
 
@@ -13,7 +13,7 @@ La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrece
 
 ## Estructura del repositorio
 
-- `src/CodexManager.App/`: codigo fuente de la aplicacion WinForms.
+- `src/CodexManager.App/`: lógica de sesiones, bandeja WinForms e interfaz WPF.
 - `assets/`: iconos y recursos estaticos usados por la app.
 - `scripts/`: scripts de build y publicacion.
 - `run.py`: wrapper minimo para ejecutar `dotnet run`.
@@ -24,21 +24,57 @@ La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrece
 
 - Clic izquierdo en el icono: abre o cierra el widget.
 - Clic derecho: muestra la opcion `Salir`.
-- El boton con icono de uso activa un perfil guardado.
-- El boton de refresco actualiza manualmente el uso de la cuenta activa.
+- El botón Activar cambia al perfil guardado, con confirmación previa.
+- Actualizar (o F5) consulta las cuotas de todas las cuentas guardadas y actualiza el histórico local de tokens. Escape oculta el panel.
 - Si Codex esta abierto, el cambio lo cierra normalmente, espera a que terminen sus procesos, preserva la generacion final de la cuenta saliente, instala la cuenta entrante y vuelve a abrirlo.
-- Si Codex esta cerrado, el cambio suele completarse en menos de un segundo y no inicia procesos salvo que se haya solicitado reautenticacion.
+- Si Codex esta cerrado, el cambio preserva la sesión sin abrir la aplicación; el modo estricto puede usar un app-server temporal.
 - Un watcher de `auth.json` guarda inmediatamente las renovaciones de tokens en el perfil que coincide por identidad.
-- Cada 5 minutos solo se actualizan los porcentajes de uso. Esta tarea no copia `auth.json`, no guarda perfiles y no crea backups.
-- Las cuentas no activas muestran el ultimo dato cacheado.
+- Cada 5 minutos solo se actualizan los porcentajes de la cuenta activa. Esta tarea no copia `auth.json`, no guarda perfiles y no crea backups.
+- Las cuentas no activas muestran su última consulta conjunta; los fallos conservan la lectura previa y su antigüedad.
 - El tooltip de la bandeja muestra el perfil activo y el porcentaje restante de la ventana de sesion cuando hay datos.
+
+## Actividad y cuotas (2.2)
+
+- La ventana WPF se crea al primer clic en la bandeja, no al arrancar ni por eventos de actualización. El reloj del panel permanece detenido mientras está oculto.
+- Panel compacto de 382 DIP, tarjetas sombreadas y Acrylic nativo. Conserva la transparencia de Windows y respeta su configuración de accesibilidad. Los tonos de sesión/semanal se derivan del acento del sistema; el fondo sigue el tema de la barra de tareas.
+- «Tu actividad» suma tokens diarios entre cuentas. Hoy/Semana y las flechas permiten recorrer hasta 365 días; las semanas son de lunes a domingo en la zona horaria local, independientes de los resets de cuota. «Modelos» despliega el reparto observado sin consultas adicionales.
+- El histórico se obtiene de `CODEX_HOME/sessions` y `archived_sessions`. No es un total de facturación ni incluye otros equipos, nube o registros eliminados antes de indexarlos. «Sin modelo» conserva consumo sin modelo identificable. La caché guarda contadores y posiciones, nunca conversaciones ni credenciales.
+- Los contadores acumulados se convierten en incrementos para evitar duplicados; cambiar de cuenta no reinicia el histórico. Archivar un archivo no lo cuenta dos veces. Las fronteras de historial heredado en forks/subagentes se excluyen cuando están presentes. Ante registros incompletos o no interpretables, el panel indica cobertura parcial.
+- Primera indexación por bloques de hasta 16 MiB / aproximadamente 1,5 s (el bloque de E/S en curso y la escritura del índice pueden finalizar después). Continúa cada 10 s mientras el panel esté visible. Se cancela al ocultarlo y se reanuda al abrirlo. Un índice completo solo se actualiza al abrir o pulsar Actualizar: no hay vigilancia continua de conversaciones en segundo plano. La caché se limita a 24 MiB y 20.000 fuentes.
+- Actualización conjunta: máximo dos consultas HTTP simultáneas, 12 s por cuenta y 60 s por lote. No cambia la cuenta activa, no abre/cierra Codex y no renueva tokens. Una sesión rechazada requiere reautenticación mediante el flujo existente. Los errores por cuenta no impiden actualizar las demás. Un 429 detiene las cuentas pendientes y respeta Retry-After (mínimo 60 s); otros lotes tienen una pausa de 15 s.
+- Las barras muestran **porcentaje restante**. La marca vertical indica el restante esperado con reparto uniforme a lo largo de la ventana. Para la cuota semanal equivale a 100/7 ≈ 14,3 puntos porcentuales por día.
+- «≈X% al reset» y «Límite en …» extrapolan el consumo medio desde el inicio de la ventana; no son límites oficiales ni predicciones garantizadas. Se ocultan con datos antiguos, errores o al inicio de una ventana. Los resets se muestran como `Resets in Xd Xh` / `Xh Xm`; al vencer se pide actualizar sin inventar un nuevo saldo.
+- Inspiración visual: [OpenUsage](https://github.com/robinebers/openusage). Implementación propia en los controles WPF existentes, sin descargar ni ejecutar esa herramienta y sin bibliotecas de gráficos nuevas.
+
+## Ajustes de interfaz (2.2.1)
+
+- Encabezado «Codex manager» con el símbolo vectorial de la aplicación, blanco en tema oscuro y oscuro en tema claro. Añadir cuenta es el botón «+» junto a Actualizar.
+- Ajustes permite subir y bajar cuentas. El orden se guarda en `ProfileOrder`, permanece al cambiar de cuenta y acompaña los renombrados. Las cuentas nuevas se añaden al final; las eliminadas desaparecen del orden.
+- El pie muestra la proporción de cuentas con cuotas recientes, la antigüedad de la última lectura y el próximo reset conocido.
+- Menú contextual con estilos propios, sin el margen blanco de iconos/marcas del menú clásico. Conserva navegación por teclado y estados deshabilitados.
+- Las notificaciones de tema no vuelven a aplicar el material DWM cuando el tema no ha cambiado.
+
+## Planes de cuenta (2.2.2)
+
+- La cabecera de cada tarjeta muestra el plan devuelto por la consulta habitual de cuotas: Plus, Pro 100, Pro 200, Pro 500, etc. No se deducen multiplicadores a partir del consumo. Una cuenta todavía no consultada no inventa un plan; los identificadores nuevos se muestran como «Otro plan».
+- La sección completa de 5 h se oculta en planes Pro y Business Premium únicamente cuando una respuesta válida contiene una sola ventana semanal y ninguna de sesión. Un error, una respuesta vacía o una ventana desconocida no se interpretan como ausencia de límite. Las lecturas previas se conservan al fallar una actualización.
+- El plan y la configuración de ventanas se guardan junto a las cuotas. No hay consultas, temporizadores ni procesos nuevos. Un cambio de plan o de límites se refleja en la siguiente actualización.
+- Referencias: [tipos del protocolo Codex](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/auth.rs), [planes Pro](https://help.openai.com/en/articles/9793128-about-chatgpt-pro-tiers) y [límites de cinco horas](https://help.openai.com/en/articles/20001516-managing-usage-with-gpt-6-astra-in-work-and-codex).
+
+## Interacción compacta (2.2.3)
+
+- Retirada la franja de mensajes de actualización: el resultado permanece en las tarjetas y en el pie. Se conserva el bloqueo de consultas repetidas y Retry-After. Los errores que impiden completar una acción se muestran en un diálogo; los errores de cuotas siguen junto a cada cuenta y los del histórico en su panel.
+- Sin anotaciones al pasar el ratón por el panel, sus botones, tarjetas o ajustes. Los controles conservan nombres accesibles y navegación por teclado.
+- Pulsar una barra o su día muestra el total exacto de tokens observado ese día, su fecha y su reparto por modelo. Pulsarlo otra vez recupera el resumen. La semana del gráfico no se mueve al seleccionar un día; las flechas y Hoy/Semana reinician la selección. Los días futuros no se pueden seleccionar. Se reutilizan los datos ya cargados.
+- `self_serve_business_prolite` se identifica como «Business Premium». Sus observaciones semanales ya guardadas también compactan la tarjeta sin una consulta extra. Los identificadores Business genéricos no se presentan como Premium ni pierden su barra de sesión.
+- Premium cuesta 100 USD/mes con facturación anual o 125 USD/mes con facturación mensual; la consulta de cuotas no distingue la modalidad de facturación, por lo que la etiqueta muestra el nivel y no un precio supuesto. [Referencia oficial](https://help.openai.com/en/articles/8542115-chatgpt-business-general-faq).
 
 ## Gestion de perfiles
 
-- `Add current account` guarda la cuenta activa actual como perfil.
-- Cada fila en `Settings` permite renombrar o eliminar un perfil.
-- `Verificar la renovacion antes de abrir Codex` activa el modo estricto. Este llama temporalmente a `account/read` con `refreshToken: true`; el modo rapido difiere esa comprobacion hasta que Codex se abra.
-- `Open data folder` abre la carpeta de datos local de la aplicacion.
+- `Añadir cuenta` guarda la cuenta activa actual como perfil.
+- El menú `…` de cada cuenta permite renombrar o eliminar un perfil.
+- `Verificar la sesión antes de abrir Codex` activa el modo estricto. Este llama temporalmente a `account/read` con `refreshToken: true`; el modo rapido difiere esa comprobacion hasta que Codex se abra.
+- `Abrir carpeta de datos`, dentro de Ajustes, abre el almacenamiento local.
 - La app puede crear un acceso directo de inicio en Windows para arrancar con la sesion del usuario.
 - Si `CODEX_HOME` no esta definido, se usa `%USERPROFILE%\\.codex`.
 
@@ -46,6 +82,7 @@ La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrece
 
 - Perfiles: `%APPDATA%\\CodexAccountTrayManager\\accounts\\`
 - Backups: `%APPDATA%\\CodexAccountTrayManager\\backups\\`
+- Histórico numérico: `%APPDATA%\\CodexAccountTrayManager\\cache\\token_history.json`
 - Cache: `%APPDATA%\\CodexAccountTrayManager\\cache\\usage_cache.json`
 - Config app: `%APPDATA%\\CodexAccountTrayManager\\config\\app_config.json`
 - Logs: `%APPDATA%\\CodexAccountTrayManager\\logs\\app.log`
@@ -62,9 +99,9 @@ La implementacion principal esta hecha en C# con WinForms. El objetivo es ofrece
 - Nunca ejecuta `logout`, porque esa operacion puede revocar credenciales.
 - No rota cuentas automaticamente.
 - No cambia de cuenta al llegar a un limite.
-- No sube datos fuera de la maquina.
+- Los perfiles y copias permanecen en este equipo. Las consultas de consumo y verificación se comunican con los servicios de Codex usando la sesión existente.
 - Las escrituras de credenciales son atomicas: temporal en el mismo directorio, `Flush(true)`, permisos restringidos, `File.Replace` y lectura de verificacion.
-- Un mutex global serializa todas las operaciones de credenciales. Una generacion con `last_refresh` anterior nunca sustituye a otra mas nueva.
+- Un semáforo con nombre serializa las operaciones de credenciales entre instancias de la misma sesión de Windows. Una generacion con `last_refresh` anterior nunca sustituye a otra mas nueva.
 - Los backups nuevos solo se crean al eliminar explicitamente un perfil y se deduplican por huella. No se crean backups al observar una renovacion ni al consultar porcentajes.
 
 ## Identidad y recuperacion
@@ -117,7 +154,7 @@ Salida esperada:
 
 El script construye primero un apphost con la misma identidad binaria que la version
 original aceptada en este equipo y comprueba su SHA-256. Despues publica por separado
-la DLL 2.0.1 y combina ambos artefactos. Si la huella del lanzador cambia, el build se
+la DLL 2.2.1 y combina ambos artefactos. Si la huella del lanzador cambia, el build se
 detiene en lugar de instalar un ejecutable que Panda pueda bloquear.
 
 La version del SDK esta fijada en `global.json` para que el resultado sea reproducible.
@@ -128,9 +165,36 @@ instalaciones paralelas.
 
 - Si `codex` no se detecta automaticamente, puedes definir `CODEX_BINARY` con la ruta completa al ejecutable.
 - La deteccion tambien comprueba `PATH`, `where codex`, `%LOCALAPPDATA%\\OpenAI\\Codex\\bin\\codex.exe` y paquetes `OpenAI.Codex_*` en WindowsApps.
-- La consulta de uso prefiere `account/rateLimits/read` cuando el modo estricto esta activo y Codex esta cerrado; en los demas casos usa `https://chatgpt.com/backend-api/wham/usage` o la base definida en `config.toml`.
+- Todas las consultas de uso utilizan HTTP sin lanzar procesos auxiliares: `https://chatgpt.com/backend-api/wham/usage` o la base definida en `config.toml`.
 - Las ventanas se clasifican por `windowDurationMins`: 300 minutos para la sesion de cinco horas y 10.080 minutos para la semanal.
 - Un 401/403 al consultar consumo solo indica que el `access_token` no fue aceptado; no se interpreta como prueba de que el `refresh_token` haya sido revocado.
-- `CodexManager.exe` es solamente el apphost estable; la implementacion y su version 2.0.1 estan en `CodexManager.dll`.
+- `CodexManager.exe` es solamente el apphost estable; la implementacion y su version 2.2.1 estan en `CodexManager.dll`.
 - La huella validada del apphost es `FDB675DC32AE35AC5391835B018E52858C7253824A610FD5F4D0B65DE95FBAC1`. Se comprobo mediante creacion suspendida y mediante un arranque real sin desactivar Panda ni crear exclusiones.
 - Para distribuir el ejecutable en otros equipos sigue siendo recomendable firmarlo con un certificado de firma de codigo confiable o autorizarlo en la herramienta de seguridad correspondiente.
+
+
+## Interfaz nativa
+
+- Tema claro u oscuro según la barra de tareas (`SystemUsesLightTheme`), aunque las aplicaciones usen otro tema. Cuando Windows aplica un color de acento a la barra, el panel incorpora ese matiz. Alto contraste respeta los colores del sistema.
+- Acrylic nativo de DWM en Windows 11 22H2 o posterior cuando los efectos de transparencia están activos. El fondo y las filas WPF dejan pasar el material del compositor; texto y barras permanecen nítidos. En otros casos se usa un fondo sólido legible.
+- Panel compacto con dos barras horizontales por cuenta, porcentajes restantes alineados, reinicios junto a las etiquetas y acciones en la cabecera. Los perfiles existentes no necesitan migración.
+- El panel se abre en el monitor del cursor y ajusta su tamaño al área de trabajo.
+- Las filas se reutilizan al actualizar; al retirar perfiles se liberan sus controles y menús.
+- El consumo muestra porcentajes restantes, fechas de reinicio, errores y antigüedad del dato. Un reinicio vencido muestra «Sin datos» hasta una nueva consulta, nunca un 100 % supuesto.
+- Añadir, renombrar y eliminar son operaciones asíncronas y se serializan con los cambios de cuenta. Salir se bloquea mientras hay una operación de credenciales en curso.
+- Los nombres admiten letras Unicode, números, espacios, guiones, guiones bajos y puntos interiores; se rechazan rutas, dispositivos reservados y puntos finales. Los directorios inválidos heredados se ignoran sin borrarlos.
+- Un fallo de verificación restaura la sesión anterior, incluida la ausencia de auth.json.
+
+### Comprobación visual aislada
+
+Para generar PNG de los temas, ajustes y estado vacío con cuentas ficticias, sin abrir Codex:
+
+```powershell
+dotnet run --project src/CodexManager.Tests/CodexManager.Tests.csproj -- --render-ui artifacts/ui-preview
+```
+
+Estas capturas verifican el contenido WPF con fondo sólido; el desenfoque de DWM depende del compositor y de la configuración de Windows. Para abrir una vista previa durante dos minutos con cuentas ficticias y el material nativo:
+
+```powershell
+dotnet run --project src/CodexManager.Tests/CodexManager.Tests.csproj -- --preview-ui
+```

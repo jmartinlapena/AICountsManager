@@ -80,6 +80,10 @@ New-Item -ItemType Directory -Path $compatibilityDir -ErrorAction Stop | Out-Nul
 New-Item -ItemType Directory -Path $packageDir -ErrorAction Stop | Out-Null
 
 try {
+    dotnet restore $project -r win-x64 -p:UseAppHost=true
+    if ($LASTEXITCODE -ne 0) {
+        throw "No se pudieron preparar las dependencias de Windows antes de compilar."
+    }
     Write-Host "Generando apphost compatible..."
     dotnet clean $project -c Release -r win-x64 --nologo
     if ($LASTEXITCODE -ne 0) {
@@ -111,7 +115,7 @@ try {
         throw "El apphost no coincide con la huella validada para este equipo. Esperada: $expectedAppHostHash. Obtenida: $appHostHash."
     }
 
-    Write-Host "Publicando CodexManager 2.0.1..."
+    Write-Host "Publicando CodexManager 2.2.4..."
     dotnet clean $project -c Release -r win-x64 --nologo
     if ($LASTEXITCODE -ne 0) {
         throw "dotnet clean fallo antes de publicar la aplicacion."
@@ -132,8 +136,8 @@ try {
         throw "La publicacion no genero CodexManager.dll."
     }
     $applicationVersion = [System.Reflection.AssemblyName]::GetAssemblyName($packageDll).Version.ToString()
-    if (-not [string]::Equals($applicationVersion, "2.0.1.0", [System.StringComparison]::Ordinal)) {
-        throw "La DLL publicada no tiene la version esperada 2.0.1.0: $applicationVersion"
+    if (-not [string]::Equals($applicationVersion, "2.2.4.0", [System.StringComparison]::Ordinal)) {
+        throw "La DLL publicada no tiene la version esperada 2.2.4.0: $applicationVersion"
     }
 
     Copy-Item -LiteralPath $compatibilityExe -Destination (Join-Path $packageDir "CodexManager.exe") -ErrorAction Stop
@@ -150,7 +154,7 @@ try {
     $deployedHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
     $deployedVersion = [System.Reflection.AssemblyName]::GetAssemblyName($dll).Version.ToString()
     if (-not [string]::Equals($deployedHash, $expectedAppHostHash, [System.StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals($deployedVersion, "2.0.1.0", [System.StringComparison]::Ordinal)) {
+        -not [string]::Equals($deployedVersion, "2.2.4.0", [System.StringComparison]::Ordinal)) {
         throw "La verificacion final del paquete fallo."
     }
 
@@ -161,7 +165,7 @@ try {
     $shortcut.Arguments = ""
     $shortcut.WorkingDirectory = $publishDir
     $shortcut.IconLocation = (Join-Path $publishDir "assets\icon.ico") + ",0"
-    $shortcut.Description = "CodexManager 2.0.1"
+    $shortcut.Description = "CodexManager 2.2.4"
     $shortcut.WindowStyle = 7
     $shortcut.Save()
 
