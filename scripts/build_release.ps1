@@ -10,7 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 Set-Location $projectRoot
-$project = Join-Path $projectRoot 'src/AicountsManager.App/AicountsManager.App.csproj'
+$project = Join-Path $projectRoot 'src/AICountsManager.App/AICountsManager.App.csproj'
 $version = ([xml](Get-Content -LiteralPath $project -Raw)).Project.PropertyGroup.Version
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version de producto no valida.' }
 if (-not $Iscc) {
@@ -22,18 +22,18 @@ if (-not (Test-Path -LiteralPath $Iscc -PathType Leaf)) { throw 'Instala Inno Se
 $release = Join-Path $projectRoot "artifacts/releases/$version"
 New-Item -ItemType Directory -Force -Path $release | Out-Null
 if (-not $SkipTests) {
-    & $Dotnet run --project src/AicountsManager.Tests/AicountsManager.Tests.csproj -c Release
+    & $Dotnet run --project src/AICountsManager.Tests/AICountsManager.Tests.csproj -c Release
     if ($LASTEXITCODE -ne 0) { throw 'Las pruebas fallaron. No se genera la distribucion.' }
 }
 foreach ($rid in $Runtime) {
-    $packageName = "AicountsManager-$version-$rid"
+    $packageName = "AICountsManager-$version-$rid"
     $package = Join-Path $release ($packageName + '-files')
     if (Test-Path -LiteralPath $package) { throw "Ya existe $package. Usa una version nueva o retira esa carpeta de salida antes de repetir." }
     & $Dotnet publish $project -c Release -r $rid --self-contained true -p:UseAppHost=true -p:PublishSingleFile=false -p:PublishTrimmed=false -p:DebugType=None -p:DebugSymbols=false -p:ContinuousIntegrationBuild=true -o $package --nologo
     if ($LASTEXITCODE -ne 0) { throw "Fallo publicando $rid." }
     # Redistribute the license/notice files belonging to the exact bundled runtime packs.
-    $runtimeConfig = Get-Content -LiteralPath (Join-Path $package 'AicountsManager.runtimeconfig.json') -Raw | ConvertFrom-Json
-    $assets = Get-Content -LiteralPath (Join-Path $projectRoot 'src/AicountsManager.App/obj/project.assets.json') -Raw | ConvertFrom-Json
+    $runtimeConfig = Get-Content -LiteralPath (Join-Path $package 'AICountsManager.runtimeconfig.json') -Raw | ConvertFrom-Json
+    $assets = Get-Content -LiteralPath (Join-Path $projectRoot 'src/AICountsManager.App/obj/project.assets.json') -Raw | ConvertFrom-Json
     foreach ($framework in $runtimeConfig.runtimeOptions.includedFrameworks) {
         $packId = ($framework.name + '.runtime.' + $rid).ToLowerInvariant()
         $pack = @($assets.packageFolders.PSObject.Properties.Name | ForEach-Object { Join-Path $_ "$packId/$($framework.version)" } | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) | Select-Object -First 1
@@ -44,8 +44,8 @@ foreach ($rid in $Runtime) {
         New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
         $notices | Copy-Item -Destination $licenseDir
     }
-    $exe = Join-Path $package 'AicountsManager.exe'
-    $dll = Join-Path $package 'AicountsManager.dll'
+    $exe = Join-Path $package 'AICountsManager.exe'
+    $dll = Join-Path $package 'AICountsManager.dll'
     if ([Reflection.AssemblyName]::GetAssemblyName($dll).Version.ToString() -ne "$version.0") { throw 'Version de DLL incorrecta.' }
     foreach ($file in @('hostfxr.dll','coreclr.dll','PresentationFramework.dll','assets/icon.ico')) {
         if (-not (Test-Path -LiteralPath (Join-Path $package $file))) { throw "Dependencia autocontenida ausente: $file" }
@@ -73,7 +73,7 @@ foreach ($rid in $Runtime) {
         $launchValidated = $true
     }
     $arch = if ($rid -eq 'win-arm64') { 'arm64' } else { 'x64compatible' }
-    & $Iscc "/DAppVersion=$version" "/DPackageDir=$package" "/DOutputDir=$release" "/DPackageName=$packageName" "/DTargetArchitecture=$arch" (Join-Path $projectRoot 'installer/AicountsManager.iss')
+    & $Iscc "/DAppVersion=$version" "/DPackageDir=$package" "/DOutputDir=$release" "/DPackageName=$packageName" "/DTargetArchitecture=$arch" (Join-Path $projectRoot 'installer/AICountsManager.iss')
     if ($LASTEXITCODE -ne 0) { throw 'No se pudo generar el instalador.' }
     $installer = Join-Path $release "$packageName-Setup.exe"
     if ($SigningThumbprint) {
@@ -82,7 +82,7 @@ foreach ($rid in $Runtime) {
     }
     $zip = Join-Path $release "$packageName-Portable.zip"
     Compress-Archive -Path (Join-Path $package '*') -DestinationPath $zip -CompressionLevel Optimal
-    $manifest = [ordered]@{ Product='AicountsManager'; Version=$version; Runtime=$rid; SelfContained=$true; LaunchValidated=$launchValidated; Signed=[bool]$SigningThumbprint; Files=@() }
+    $manifest = [ordered]@{ Product='AICountsManager'; Version=$version; Runtime=$rid; SelfContained=$true; LaunchValidated=$launchValidated; Signed=[bool]$SigningThumbprint; Files=@() }
     $manifest.Files = @(Get-ChildItem -LiteralPath $package -Recurse -File | ForEach-Object { [ordered]@{ Path=[IO.Path]::GetRelativePath($package,$_.FullName); SHA256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash } })
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $release "$packageName-manifest.json") -Encoding utf8
     Write-Host "Generado: $installer"

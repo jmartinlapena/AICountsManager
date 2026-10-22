@@ -1,4 +1,4 @@
-name: AicountsManager release
+name: AICountsManager release
 on:
   workflow_dispatch:
   push:
@@ -21,7 +21,7 @@ jobs:
         run: ./scripts/build_release.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: AicountsManager-distribution
+          name: AICountsManager-distribution
           path: |
             artifacts/releases/*/*-Setup.exe
             artifacts/releases/*/*-Portable.zip

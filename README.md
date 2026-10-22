@@ -1,6 +1,6 @@
-# AicountsManager
+# AICountsManager
 
-[Repositorio](https://github.com/jmartinlapena/AicountsManager) · [Validación de la versión 3.0.0](docs/VALIDATION-3.0.0.md)
+[Repositorio](https://github.com/jmartinlapena/AICountsManager) · [Validación de la versión 3.0.1](docs/VALIDATION-3.0.1.md)
 
 Gestor ligero de cuentas y consumo de herramientas de IA para la bandeja de Windows: Codex, Antigravity, Claude y Cursor.
 
@@ -8,11 +8,11 @@ La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF
 
 ## Instalar sin compilar
 
-Usa `AicountsManager-3.0.0-win-x64-Setup.exe` en equipos Intel/AMD, o `win-arm64` en Windows ARM. Se instala para tu usuario, crea el acceso directo y permite desinstalar desde Configuración de Windows. No necesita administrador, SDK, Python ni instalar .NET: el runtime .NET 10 LTS viene incluido.
+Usa `AICountsManager-3.0.1-win-x64-Setup.exe` en equipos Intel/AMD, o `win-arm64` en Windows ARM. Se instala para tu usuario, crea el acceso directo y permite desinstalar desde Configuración de Windows. No necesita administrador, SDK, Python ni instalar .NET: el runtime .NET 10 LTS viene incluido.
 
-También se genera un `Portable.zip`: descomprime **todo** el ZIP y ejecuta `AicountsManager.exe`. No copies solo el EXE. Requiere Windows 10 2004 (19041) o posterior / Windows 11; no funciona en macOS o Linux.
+También se genera un `Portable.zip`: descomprime **todo** el ZIP y ejecuta `AICountsManager.exe`. No copies solo el EXE. Requiere Windows 10 2004 (19041) o posterior / Windows 11; no funciona en macOS o Linux.
 
-Solo es necesario cerrar la aplicación al instalar una actualización. El instalador detecta las instancias antigua y nueva. Los datos permanecen fuera del paquete: `%APPDATA%/AicountsManager` en instalaciones nuevas o `%APPDATA%/CodexAccountTrayManager` al actualizar una antigua. La desinstalación conserva esos datos. El acceso de inicio automático antiguo se renombra al primer arranque.
+Solo es necesario cerrar la aplicación al instalar una actualización. El instalador detecta si AICountsManager está abierto. Los datos permanecen fuera del paquete, en `%APPDATA%/AICountsManager`; la desinstalación los conserva. Si proceden de una versión con otra carpeta de datos, sigue la migración indicada más abajo antes del primer arranque.
 
 Los paquetes no incluyen cuentas del desarrollador ni credenciales. Se generan SHA-256 y manifiestos por arquitectura. La firma Authenticode requiere un certificado propio; sin él los artefactos se identifican como no firmados. No se garantiza reputación de SmartScreen/antivirus en todos los equipos.
 
@@ -22,7 +22,7 @@ Claude y Cursor están desactivados por defecto. Se activan individualmente en A
 
 Sin servicios, procesos auxiliares permanentes, bibliotecas de gráficos, telemetría ni nuevos temporizadores. Las cuotas reutilizan el ciclo de cinco minutos. Los históricos solo se leen al abrir/actualizar el panel; desactivar un proveedor evita sus lecturas y peticiones. WPF continúa creándose al primer uso.
 
-Para Codex se requiere su instalación y autenticación en archivo (`cli_auth_credentials_store = "file"`). Claude necesita un inicio de sesión de Claude Code; Cursor, el de su aplicación. Las sesiones externas caducadas se renuevan desde sus clientes, sin que AicountsManager escriba sus credenciales.
+Para Codex se requiere su instalación y autenticación en archivo (`cli_auth_credentials_store = "file"`). Claude necesita un inicio de sesión de Claude Code; Cursor, el de su aplicación. Las sesiones externas caducadas se renuevan desde sus clientes, sin que AICountsManager escriba sus credenciales.
 
 ## Requisitos de desarrollo
 
@@ -30,7 +30,7 @@ Solo el equipo que genera las versiones necesita el SDK .NET 10 de `global.json`
 
 ## Estructura del repositorio
 
-- `src/AicountsManager.App/`: lógica de sesiones, bandeja WinForms e interfaz WPF.
+- `src/AICountsManager.App/`: lógica de sesiones, bandeja WinForms e interfaz WPF.
 - `assets/`: iconos y recursos estaticos usados por la app.
 - `scripts/`: scripts de build y publicacion.
 - `run.py`: wrapper minimo para ejecutar `dotnet run`.
@@ -65,7 +65,7 @@ Solo el equipo que genera las versiones necesita el SDK .NET 10 de `global.json`
 
 ## Ajustes de interfaz (2.2.1)
 
-- Encabezado «AicountsManager» con el símbolo vectorial de la aplicación, blanco en tema oscuro y oscuro en tema claro. Añadir cuenta es el botón «+» junto a Actualizar.
+- Encabezado «AICountsManager» con el símbolo vectorial de la aplicación, blanco en tema oscuro y oscuro en tema claro. Añadir cuenta es el botón «+» junto a Actualizar.
 - Ajustes permite subir y bajar cuentas. El orden se guarda en `ProfileOrder`, permanece al cambiar de cuenta y acompaña los renombrados. Las cuentas nuevas se añaden al final; las eliminadas desaparecen del orden.
 - El pie muestra la proporción de cuentas con cuotas recientes, la antigüedad de la última lectura y el próximo reset conocido.
 - Menú contextual con estilos propios, sin el margen blanco de iconos/marcas del menú clásico. Conserva navegación por teclado y estados deshabilitados.
@@ -109,7 +109,7 @@ Solo el equipo que genera las versiones necesita el SDK .NET 10 de `global.json`
 - Antigravity consulta directamente Google Cloud Code con la sesión `gemini:antigravity` del Administrador de credenciales de Windows. No necesita que la aplicación esté abierta. Si el acceso ha caducado o Google lo rechaza, se renueva mediante OAuth; los tokens derivados se conservan solo en memoria y se invalidan al cambiar/desaparecer la credencial original. No se modifica la credencial de Antigravity. Los fallos de red y 429 no provocan renovaciones. Las conexiones remotas validan TLS y rechazan redirecciones.
 - El servidor local es un respaldo si no hay credencial compatible y un complemento de hasta 2 segundos para cuotas adicionales no expuestas por Google, solo cuando coincide la identidad. El descubrimiento WMI y la tabla TCP se leen solo al actualizar, fuera del hilo de interfaz. Las solicitudes se limitan a puertos de ese proceso en `127.0.0.1`, sin proxy ni redirecciones. La excepción de certificado autofirmado se limita a HTTPS de loopback. La identidad se comprueba antes y después de leer las cuotas; sesiones diferentes no se mezclan.
 - La tarjeta reproduce Gemini semanal/5 h, Claude-GPT semanal/5 h y Gemini 4 Argon semanal cuando está disponible. Cada ventana conserva su reset y porcentaje restante. No se infiere acceso a Argon a partir del plan ni se interpreta un dato ausente como 0 o 100 %.
-- Es necesario haber iniciado sesión en Antigravity al menos una vez. No se inicia, cierra ni cambia su cuenta desde AicountsManager. Si la consulta falla, se identifica la última lectura como antigua; una cuenta distinta reemplaza la lectura anterior completa. `+` permite guardar Codex o conectar Antigravity actual; Ajustes permite desactivar Antigravity. Solo Codex muestra acciones de sesión.
+- Es necesario haber iniciado sesión en Antigravity al menos una vez. No se inicia, cierra ni cambia su cuenta desde AICountsManager. Si la consulta falla, se identifica la última lectura como antigua; una cuenta distinta reemplaza la lectura anterior completa. `+` permite guardar Codex o conectar Antigravity actual; Ajustes permite desactivar Antigravity. Solo Codex muestra acciones de sesión.
 - La barra superior `Hoy / Semana / Cuotas` reúne los tokens diarios, los tokens semanales y el resumen por proveedor en un mismo recuadro. La vista inicial es `Hoy`; el histórico conserva sus flechas de navegación, selección de días y desglose por modelos. La rosquilla reparte los tokens registrados de la semana natural actual (lunes a hoy) entre proveedores: un segmento por proveedor, incluyendo todos los modelos de Antigravity. No usa ni suma porcentajes de cuota; las cuotas siguen en las tarjetas de las cuentas. Los colores identifican al proveedor. Los proveedores sin uso no generan segmentos y el historial incompleto se indica como parcial.
 - Las barras diarias de tokens apilan los modelos de cada proveedor; la suma sigue siendo diaria y transversal a las cuentas. Se conservan Hoy/Semana, navegación, selección del día y modelos. Los modelos se identifican por proveedor y nombre, también en «otros modelos»: nunca se atribuyen tokens de Codex a Antigravity ni se deducen tokens de un porcentaje de cuota. El estado conserva `sin historial local` cuando falta la fuente; el desglose de modelos omite proveedores desconocidos y filas sin tokens en el periodo seleccionado.
 - Antigravity lee `~/.gemini/antigravity*/conversations/*.db`, solo `gen_metadata.data` y la fecha en `steps.metadata`, con SQLite incluido en Windows (`winsqlite3.dll`). Se extraen los campos de contabilidad protobuf, nunca se conservan mensajes. Se suman entrada, prompt de sistema, salida y caché leída. Los registros sin fecha válida no se asignan a un día ficticio. El último tramo se relee para capturar generaciones que se completan, reemplazándolas por índice en vez de sumarlas de nuevo.
@@ -128,15 +128,19 @@ Solo el equipo que genera las versiones necesita el SDK .NET 10 de `global.json`
 - La app puede crear un acceso directo de inicio en Windows para arrancar con la sesion del usuario.
 - Si `CODEX_HOME` no esta definido, se usa `%USERPROFILE%\\.codex`.
 
+## Migración de datos
+
+Cierra la aplicación anterior. Conserva la ruta de datos indicada en Ajustes → Almacenamiento y ejecuta `./scripts/migrate_data.ps1 -Source "<ruta actual>"`. El script traslada la carpeta completa a `%APPDATA%/AICountsManager`, comprueba sus huellas y se niega a mezclar o sobrescribir un destino existente. Recrea el acceso de inicio desde el instalador o desde Ajustes. No copies cuentas dentro del paquete de distribución.
+
 ## Almacenamiento local
 
-- Perfiles: `%APPDATA%\\CodexAccountTrayManager\\accounts\\`
-- Backups: `%APPDATA%\\CodexAccountTrayManager\\backups\\`
-- Histórico numérico: `%APPDATA%\\CodexAccountTrayManager\\cache\\token_history.json`
-- Cache: `%APPDATA%\\CodexAccountTrayManager\\cache\\usage_cache.json`
-- Config app: `%APPDATA%\\CodexAccountTrayManager\\config\\app_config.json`
-- Logs: `%APPDATA%\\CodexAccountTrayManager\\logs\\app.log`
-- Diario transaccional sin secretos: `%APPDATA%\\CodexAccountTrayManager\\transactions\\current.json`
+- Perfiles: `%APPDATA%\\AICountsManager\\accounts\\`
+- Backups: `%APPDATA%\\AICountsManager\\backups\\`
+- Histórico numérico: `%APPDATA%\\AICountsManager\\cache\\token_history.json`
+- Cache: `%APPDATA%\\AICountsManager\\cache\\usage_cache.json`
+- Config app: `%APPDATA%\\AICountsManager\\config\\app_config.json`
+- Logs: `%APPDATA%\\AICountsManager\\logs\\app.log`
+- Diario transaccional sin secretos: `%APPDATA%\\AICountsManager\\transactions\\current.json`
 - Config Codex: `%USERPROFILE%\\.codex\\config.toml`, o `CODEX_HOME\\config.toml` si `CODEX_HOME` esta definido.
 - Auth activo: `%USERPROFILE%\\.codex\\auth.json`, o `CODEX_HOME\\auth.json` si `CODEX_HOME` esta definido.
 
@@ -160,7 +164,7 @@ La asociacion entre el `auth.json` activo y un perfil se realiza con los identif
 
 Si una verificacion estricta devuelve `refresh_token_invalidated`, la aplicacion restaura la cuenta saliente y ofrece preparar la cuenta de destino para reautenticacion. Tras un login correcto, el watcher captura el nuevo `auth.json` sin esperar al temporizador de consumo.
 
-El diario transaccional no contiene tokens y permite reconciliar un cambio interrumpido. Si la identidad activa no pertenece a ningun perfil guardado, AicountsManager no la sobrescribe: exige guardarla primero.
+El diario transaccional no contiene tokens y permite reconciliar un cambio interrumpido. Si la identidad activa no pertenece a ningun perfil guardado, AICountsManager no la sobrescribe: exige guardarla primero.
 
 ## Desarrollo
 
@@ -173,7 +177,7 @@ scripts\run_dev.cmd
 Tambien puedes ejecutar directamente:
 
 ```powershell
-dotnet run --project src\AicountsManager.App\AicountsManager.App.csproj
+dotnet run --project src\AICountsManager.App\AICountsManager.App.csproj
 ```
 
 `run.py` sigue disponible como wrapper minimo, pero no es necesario.
@@ -187,7 +191,7 @@ python run.py
 Pruebas de regresion (usan exclusivamente credenciales ficticias y directorios temporales):
 
 ```powershell
-dotnet run --project src\AicountsManager.Tests\AicountsManager.Tests.csproj
+dotnet run --project src\AICountsManager.Tests\AICountsManager.Tests.csproj
 ```
 
 ## Generar una distribución
@@ -230,13 +234,13 @@ El workflow `.github/workflows/release.yml` ejecuta el mismo flujo en Windows y 
 Para generar PNG de los temas, ajustes y estado vacío con cuentas ficticias, sin abrir Codex:
 
 ```powershell
-dotnet run --project src/AicountsManager.Tests/AicountsManager.Tests.csproj -- --render-ui artifacts/ui-preview
+dotnet run --project src/AICountsManager.Tests/AICountsManager.Tests.csproj -- --render-ui artifacts/ui-preview
 ```
 
 Estas capturas verifican el contenido WPF con fondo sólido; el desenfoque de DWM depende del compositor y de la configuración de Windows. Para abrir una vista previa durante dos minutos con cuentas ficticias y el material nativo:
 
 ```powershell
-dotnet run --project src/AicountsManager.Tests/AicountsManager.Tests.csproj -- --preview-ui
+dotnet run --project src/AICountsManager.Tests/AICountsManager.Tests.csproj -- --preview-ui
 ```
 
 La validación de arranque del paquete es obligatoria por defecto. `-SkipLaunchTest` solo permite producir artefactos sin ejecutarlos cuando el equipo de compilación lo bloquea; el manifiesto registra `LaunchValidated: false`. No equivale a una distribución validada.

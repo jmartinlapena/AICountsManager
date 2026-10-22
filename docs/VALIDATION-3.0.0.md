@@ -1,4 +1,4 @@
-# Validación de AicountsManager 3.0.0
+# Validación de AICountsManager 3.0.0
 
 Fecha: 22 de octubre de 2026. Entorno: Windows x64, SDK .NET 10.0.402.
 
@@ -24,6 +24,6 @@ No se han añadido temporizadores de fondo. Las cuotas reutilizan el ciclo exist
 - Los paquetes no están firmados: no hay certificado de firma de código disponible. El script admite un certificado válido mediante `-SigningThumbprint`; no se instala una raíz de confianza ni se autofirma el producto.
 - ARM64 se ha compilado y comprobado estructuralmente; no se ha ejecutado en hardware ARM64.
 
-El script normal exige el smoke test nativo. `-SkipLaunchTest` permite generar artefactos pendientes de esa validación sin marcarla como superada. Debe probarse `AicountsManager.exe --self-test <ruta-de-informe>` después de la clasificación/autorización de Panda y antes de sustituir la versión anterior.
+El script normal exige el smoke test nativo. `-SkipLaunchTest` permite generar artefactos pendientes de esa validación sin marcarla como superada. Debe probarse `AICountsManager.exe --self-test <ruta-de-informe>` después de la clasificación/autorización de Panda y antes de sustituir la versión anterior.
 
 [Procedimiento oficial de clasificación de WatchGuard](https://www.watchguard.com/help/docs/help-center/en-us/content/en-us/Endpoint-Security/monitor-threats/allow-blocked-items.html).

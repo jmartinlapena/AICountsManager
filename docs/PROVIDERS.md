@@ -1,4 +1,4 @@
-# Proveedores de AicountsManager 3.0
+# Proveedores de AICountsManager 3.0
 
 Solo Codex permite guardar y activar varias cuentas. Claude y Cursor consultan la sesión actual de su cliente y se habilitan en Ajustes; están apagados en una instalación nueva. Desactivarlos retira sus tarjetas e históricos y evita consultas y lecturas posteriores.
 
@@ -38,4 +38,4 @@ Fuentes consultadas el 22 de octubre de 2026, sin instalar ni ejecutar esas herr
 - [Cliente Cursor](https://github.com/robinebers/openusage/blob/main/Sources/OpenUsage/Providers/Cursor/CursorUsageClient.swift)
 - [Normalización Cursor](https://github.com/robinebers/openusage/blob/main/Sources/OpenUsage/Providers/Cursor/CursorUsageMapper.swift)
 - [Eventos Cursor](https://github.com/robinebers/openusage/blob/main/Sources/OpenUsage/Providers/Cursor/CursorUsageEvents.swift)
-- [Monitorización oficial de Claude Code](https://code.claude.com/docs/en/monitoring-usage): describe OTel, no un contrato público de cuotas OAuth. AicountsManager no habilita telemetría ni recolectores adicionales.
+- [Monitorización oficial de Claude Code](https://code.claude.com/docs/en/monitoring-usage): describe OTel, no un contrato público de cuotas OAuth. AICountsManager no habilita telemetría ni recolectores adicionales.
