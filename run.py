@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def main() -> int:
-    project = Path(__file__).resolve().parent / "src" / "CodexManager.App" / "CodexManager.App.csproj"
+    project = Path(__file__).resolve().parent / "src" / "AicountsManager.App" / "AicountsManager.App.csproj"
     command = ["dotnet", "run", "--project", str(project)]
     return subprocess.call(command)
 

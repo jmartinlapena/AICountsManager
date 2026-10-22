@@ -3,10 +3,10 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_ROOT=%%~fI"
-set "PROJECT=%PROJECT_ROOT%\src\CodexManager.App\CodexManager.App.csproj"
+set "PROJECT=%PROJECT_ROOT%\src\AicountsManager.App\AicountsManager.App.csproj"
 
 if not exist "%PROJECT%" (
-    echo No se encontro el proyecto esperado en src\CodexManager.App.
+    echo No se encontro el proyecto esperado en src\AicountsManager.App.
     exit /b 1
 )
 
