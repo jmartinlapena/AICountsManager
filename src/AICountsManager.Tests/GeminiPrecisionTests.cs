@@ -22,9 +22,9 @@ internal static partial class Program
         }
         var elements = Descendants(card).ToArray();
         var texts = elements.OfType<C.TextBlock>().Select(t=>t.Text).ToArray();
-        Check(texts.Contains("100%"), "Gemini does not use Codex integer rounding.");
+        Check(texts.Contains("100% restante"), "Gemini does not use Codex integer rounding.");
         Check(texts.Contains("≈100% al reset"), "Gemini forecast differs from Codex formatting.");
-        Check(texts.Count(t=>t=="100%") == 2, "Actual unused five-hour quota is not 100%.");
+        Check(texts.Count(t=>t=="100% restante") == 2, "Actual unused five-hour quota is not 100%.");
         Check(elements.Count(e=>Equals(e.Tag,"weekly-pace-marker"))==1, "First-day weekly reference is missing or applied to session quota.");
         Check(UsagePresentation.Forecast(pace)=="≈100% al reset", "Codex's existing presentation was changed.");
         Check(UsagePresentation.Percent(99.999999)=="100%" && UsagePresentation.Percent(.000001)=="0%", "Percentage formatting differs by provider.");

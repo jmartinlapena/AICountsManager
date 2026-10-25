@@ -30,7 +30,7 @@ internal static partial class Program
                 external.Update(SampleAntigravity() with { Status = profile.Status, Quotas = [quota] }); window.UpdateLayout();
                 var index = minutes == 300 ? 0 : 1; var elements = QuotaElements(external).ToArray();
                 var texts = elements.OfType<C.TextBlock>().Select(t => t.Text).ToArray();
-                Check(texts.Contains(UiField<C.TextBlock[]>(codex,"_percent")[index].Text.Replace(" restante", "")), "Provider percentage differs from Codex.");
+                Check(texts.Contains(UiField<C.TextBlock[]>(codex,"_percent")[index].Text), "Provider percentage differs from Codex.");
                 Check(texts.Contains(UiField<C.TextBlock[]>(codex,"_reset")[index].Text), "Provider reset counter differs from Codex.");
                 var forecast = elements.OfType<C.TextBlock>().SingleOrDefault(e => Equals(e.Tag,"weekly-forecast"))?.Text ?? "";
                 Check(forecast == UiField<C.TextBlock[]>(codex,"_forecast")[index].Text, "Provider forecast differs from Codex.");

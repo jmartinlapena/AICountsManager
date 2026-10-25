@@ -117,46 +117,68 @@ internal sealed class CurrentProviderCard : C.Border
 {
     private UiTheme _theme;
     private ProviderUsage? _account;
-    public CurrentProviderCard(UiTheme theme) { _theme = theme; CornerRadius = new(11); Padding = new(12, 10, 12, 11); Margin = new(0, 0, 0, 8); }
+    public CurrentProviderCard(UiTheme theme) { _theme = theme; CornerRadius = new(11); Padding = new(12, 10, 12, 11); Margin = new(0, 0, 0, 8); BorderThickness = new(1); BorderBrush = M.Brushes.Transparent; }
     public void SetTheme(UiTheme theme) { _theme = theme; if (_account is not null) Update(_account); }
     public void Update(ProviderUsage account)
     {
         _account = account; W.Automation.AutomationProperties.SetName(this, "Cuenta " + ProviderIds.Name(account.Provider) + " · " + account.Name); Background = UiTheme.Brush(_theme.Dark ? M.Colors.White : M.Colors.Black, 10);
         var stack = new C.StackPanel(); Child = stack;
-        var header = new C.DockPanel(); header.Children.Add(ProviderIcons.Create(account.Provider, _theme));
+        var header = new C.DockPanel { Margin = new(0, 0, 0, 9) }; header.Children.Add(ProviderIcons.Create(account.Provider, _theme));
         var identity = new C.StackPanel();
-        identity.Children.Add(new C.TextBlock { Text = account.Name + (account.Plan is { Length: > 0 } ? " · " + account.Plan.Replace("Google AI ", "") : ""), FontSize = 12, FontWeight = W.FontWeights.SemiBold, TextTrimming = W.TextTrimming.CharacterEllipsis });
-        identity.Children.Add(new C.TextBlock { Text = account.Email ?? "Sesión actual · solo consulta", FontSize = 10, Foreground = UiTheme.Brush(_theme.Muted), TextTrimming = W.TextTrimming.CharacterEllipsis });
+        var title = new C.Grid { HorizontalAlignment = W.HorizontalAlignment.Left };
+        title.ColumnDefinitions.Add(new C.ColumnDefinition());
+        title.ColumnDefinitions.Add(new C.ColumnDefinition { Width = W.GridLength.Auto });
+        title.Children.Add(new C.TextBlock { Text = account.Name, FontSize = 13, FontWeight = W.FontWeights.SemiBold,
+            VerticalAlignment = W.VerticalAlignment.Center, TextTrimming = W.TextTrimming.CharacterEllipsis });
+        if (account.Plan is { Length: > 0 } plan)
+        {
+            var accent = ProviderIcons.Color(account.Provider, _theme);
+            var badge = new C.Border { CornerRadius = new(4), Padding = new(5, 2, 5, 2), Margin = new(6, 0, 0, 0),
+                VerticalAlignment = W.VerticalAlignment.Center, Background = UiTheme.Brush(accent, _theme.HighContrast ? (byte)0 : (byte)20),
+                Child = new C.TextBlock { Text = plan.Replace("Google AI ", ""), FontSize = 9.5, FontWeight = W.FontWeights.SemiBold,
+                    Foreground = UiTheme.Brush(accent), TextTrimming = W.TextTrimming.CharacterEllipsis, MaxWidth = 110 } };
+            C.Grid.SetColumn(badge, 1); title.Children.Add(badge);
+        }
+        identity.Children.Add(title);
+        identity.Children.Add(new C.TextBlock { Text = account.Email ?? "Sesión actual · solo consulta", FontSize = 10,
+            Margin = new(0, 2, 0, 0), Foreground = UiTheme.Brush(_theme.Muted), TextTrimming = W.TextTrimming.CharacterEllipsis });
         header.Children.Add(identity); stack.Children.Add(header);
         var groupIndex = 0;
         foreach (var group in account.Quotas.GroupBy(q => q.Group))
         {
             var color = ProviderIcons.Color(account.Provider, _theme, groupIndex++);
-            stack.Children.Add(new C.TextBlock { Text = group.Key, FontSize = 10.5, Foreground = UiTheme.Brush(_theme.Muted), Margin = new(0, 10, 0, 4) });
+            stack.Children.Add(new C.TextBlock { Text = group.Key, FontSize = 10, Foreground = UiTheme.Brush(_theme.Muted),
+                TextTrimming = W.TextTrimming.CharacterEllipsis, Margin = new(0, groupIndex == 1 ? 0 : 10, 0, 4) });
+            var quotaIndex = 0;
             foreach (var q in group)
             {
-                var used = q.CurrentUsed; var line = new C.DockPanel();
+                var used = q.CurrentUsed;
                 var display = QuotaDisplay.Create(q.Window, used is double consumed ? 100 - consumed : null, account.Fresh, DateTimeOffset.UtcNow);
-                var percent = new C.TextBlock { Text = display.RemainingText, FontSize = 11, Foreground = UiTheme.Brush(color) };
-                C.DockPanel.SetDock(percent, C.Dock.Right); line.Children.Add(percent);
-                line.Children.Add(new C.TextBlock { Text = q.Label + " restante", FontSize = 10.5 }); stack.Children.Add(line);
-                var grid = new C.Grid { Height = 4, Margin = new(0, 4, 0, 3) }; grid.Children.Add(new C.Border { Background = UiTheme.Brush(_theme.Text, 24), CornerRadius = new(2) });
+                var line = new C.DockPanel { Margin = new(0, quotaIndex++ == 0 ? 0 : 10, 0, 6) };
+                if (display.Pace is not null)
+                {
+                    var forecast = new C.TextBlock { Text = display.ForecastText, Tag = "weekly-forecast", FontSize = 9.5, TextTrimming = W.TextTrimming.CharacterEllipsis,
+                        HorizontalAlignment = W.HorizontalAlignment.Right,
+                        Foreground = UiTheme.Brush(display.AtRisk ? _theme.Warning : _theme.Muted) };
+                    C.DockPanel.SetDock(forecast, C.Dock.Right); line.Children.Add(forecast);
+                }
+                line.Children.Add(new C.TextBlock { Text = q.Label, FontSize = 11, FontWeight = W.FontWeights.SemiBold, TextTrimming = W.TextTrimming.CharacterEllipsis }); stack.Children.Add(line);
+                var grid = new C.Grid { Height = 4 }; grid.Children.Add(new C.Border { Background = UiTheme.Brush(_theme.Text, _theme.Dark ? (byte)26 : (byte)22), CornerRadius = new(2) });
                 var fill = new C.Border { Background = UiTheme.Brush(color), CornerRadius = new(2), HorizontalAlignment = W.HorizontalAlignment.Left };
                 grid.SizeChanged += (_, _) => fill.Width = display.FillWidth(grid.ActualWidth); grid.Children.Add(fill);
                 if (display.Reference is not null)
                 {
-                    var marker = new C.Border { Tag = "weekly-pace-marker", Width = 2, Height = 7, Background = UiTheme.Brush(_theme.Text, 180), HorizontalAlignment = W.HorizontalAlignment.Left };
-                    grid.SizeChanged += (_, _) => marker.Margin = new W.Thickness(display.MarkerOffset(grid.ActualWidth), -1.5, 0, -1.5); grid.Children.Add(marker);
+                    var marker = new C.Border { Tag = "weekly-pace-marker", Width = 2, Height = 8, VerticalAlignment = W.VerticalAlignment.Center,
+                        Background = UiTheme.Brush(_theme.Text, 170), HorizontalAlignment = W.HorizontalAlignment.Left };
+                    grid.SizeChanged += (_, _) => marker.Margin = new W.Thickness(display.MarkerOffset(grid.ActualWidth), -2, 0, -2); grid.Children.Add(marker);
                 }
                 stack.Children.Add(grid);
-                var footer = new C.DockPanel { Margin = new(0, 0, 0, 5) };
-                if (display.Pace is not null)
-                {
-                    var forecast = new C.TextBlock { Text = display.ForecastText, Tag = "weekly-forecast", FontSize = 9,
-                        Foreground = UiTheme.Brush(display.AtRisk ? _theme.Warning : _theme.Muted), Margin = new(6, 0, 0, 0) };
-                    C.DockPanel.SetDock(forecast, C.Dock.Right); footer.Children.Add(forecast);
-                }
-                footer.Children.Add(new C.TextBlock { Text = display.ResetText, FontSize = 9, Foreground = UiTheme.Brush(_theme.Muted) });
+                var footer = new C.DockPanel { Margin = new(0, 5, 0, 0) };
+                var reset = new C.TextBlock { Text = display.ResetText ?? "Sin fecha", FontSize = 9.5, TextTrimming = W.TextTrimming.CharacterEllipsis,
+                    HorizontalAlignment = W.HorizontalAlignment.Right, Foreground = UiTheme.Brush(_theme.Muted) };
+                C.DockPanel.SetDock(reset, C.Dock.Right); footer.Children.Add(reset);
+                footer.Children.Add(new C.TextBlock { Text = display.RemainingText + (used.HasValue ? " restante" : ""),
+                    FontSize = 10, TextTrimming = W.TextTrimming.CharacterEllipsis, Foreground = UiTheme.Brush(color) });
                 stack.Children.Add(footer);
             }
         }

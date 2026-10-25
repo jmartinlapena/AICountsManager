@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>AICountsManager</AssemblyName>
     <RootNamespace>AICountsManager</RootNamespace>
-    <Version>3.0.1</Version>
+    <Version>3.0.3</Version>
     <ApplicationIcon>../../assets/icon.ico</ApplicationIcon>
     <Product>AICountsManager</Product>
     <Authors>Jorge Martin</Authors>
