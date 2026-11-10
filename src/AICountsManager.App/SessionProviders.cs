@@ -5,24 +5,38 @@ using System.Text.Json;
 namespace AICountsManager;
 
 // These sessions belong to their clients. Never rotate tokens, start a client or write its store.
-internal sealed record ClientSession(string AccessToken, string? Email = null, string? Plan = null, long? ExpiresAt = null)
+internal sealed record ClientSession(string AccessToken, string? Email = null, string? Plan = null, long? ExpiresAt = null, string? AccountId = null, string? OrganizationId = null)
 {
     public string Fingerprint => AuthHash.Bytes(Encoding.UTF8.GetBytes(AccessToken));
     public override string ToString() => "ClientSession [redacted]";
 }
 internal interface IClientSessionSource { ClientSession? Read(); }
-internal sealed class ClaudeSessionSource(string home) : IClientSessionSource
+internal sealed class ClaudeSessionSource(string home, IClientSessionSource? desktop = null) : IClientSessionSource
 {
     public static string Home => Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR") is { Length: > 0 } path
         ? path : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
     public ClientSession? Read()
     {
+        var terminal = ReadTerminal();
+        return terminal is not null && (terminal.ExpiresAt is null || terminal.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            ? terminal : desktop?.Read() ?? terminal;
+    }
+    private ClientSession? ReadTerminal()
+    {
         try
         {
             var path = Path.Combine(home, ".credentials.json");
             if (!File.Exists(path) || new FileInfo(path).Length > 128 * 1024) return null;
-            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var doc = JsonDocument.Parse(file);
+            return ParseCredential(ClaudeSessionArchive.ReadFile(path, 128 * 1024)!);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return null; }
+    }
+    internal static ClientSession? ParseCredential(byte[] bytes)
+    {
+        if (bytes.Length > 128 * 1024) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(bytes);
             var oauth = ProviderJson.Get(doc.RootElement, "claudeAiOauth");
             var token = ProviderJson.Text(oauth, "accessToken");
             if (!ProviderJson.ValidToken(token)) return null;
@@ -31,7 +45,7 @@ internal sealed class ClaudeSessionSource(string home) : IClientSessionSource
             if (tier is not null && System.Text.RegularExpressions.Regex.Match(tier, @"\d+x") is { Success: true } match) plan += " " + match.Value;
             return new(token!, Plan: plan, ExpiresAt: ProviderJson.Timestamp(ProviderJson.Get(oauth, "expiresAt")));
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return null; }
+        catch (Exception ex) when (ex is JsonException or ArgumentException) { return null; }
     }
 }
 internal sealed class CursorSessionSource(string database) : IClientSessionSource
@@ -123,7 +137,7 @@ internal static class ProviderHttp
     }
     public static ProviderUsage Failure(string provider, ClientSession? session, int? status = null, int? retry = null) =>
         ProviderUsage.Unavailable(provider, status == 429 ? "Consulta limitada por el proveedor. Espera antes de actualizar."
-            : session is null || status is 401 or 403 ? "Inicia sesión en " + (provider == ProviderIds.Claude ? "Claude Code" : "Cursor") + " y vuelve a actualizar."
+            : session is null || status is 401 or 403 ? "Inicia sesión en " + (provider == ProviderIds.Claude ? "Claude Desktop o Claude Code" : "Cursor") + " y vuelve a actualizar."
             : "No se pudo consultar el uso. Vuelve a actualizar.") with { Identity = session?.Fingerprint, HttpStatus = status, RetryAfterSeconds = retry,
                 Status = session is null ? "disconnected" : "error" };
 }
@@ -142,7 +156,8 @@ internal sealed class ClaudeQuotaProvider(IClientSessionSource sessions, HttpCli
         if (response.Status != 200) return ProviderHttp.Failure(Id, session, response.Status, response.RetryAfter);
         var quotas = Parse(response.Body);
         if (quotas.Count == 0) return ProviderHttp.Failure(Id, session);
-        string? email = session.Email, plan = session.Plan; string name = "Claude";
+        string? email = session.Email, plan = session.Plan; string name = "Claude"; string? identity = null;
+        var verified = session.AccountId is null;
         try
         {
             using var optional = CancellationTokenSource.CreateLinkedTokenSource(token); optional.CancelAfter(TimeSpan.FromSeconds(2));
@@ -152,14 +167,19 @@ internal sealed class ClaudeQuotaProvider(IClientSessionSource sessions, HttpCli
             if (profile.Status == 200)
             {
                 var account = ProviderJson.Get(profile.Body, "account"); var org = ProviderJson.Get(profile.Body, "organization");
+                verified = session.AccountId is null || (Guid.TryParse(ProviderJson.Text(account, "uuid"), out var accountId)
+                    && Guid.TryParse(session.AccountId, out var expectedAccount) && accountId == expectedAccount
+                    && Guid.TryParse(ProviderJson.Text(org, "uuid"), out var orgId)
+                    && Guid.TryParse(session.OrganizationId, out var expectedOrg) && orgId == expectedOrg);
+                if (Guid.TryParse(ProviderJson.Text(account, "uuid"), out var stableAccount) && Guid.TryParse(ProviderJson.Text(org, "uuid"), out var stableOrg)) identity = stableAccount.ToString() + ":" + stableOrg.ToString();
                 email = ProviderJson.Text(account, "email"); name = ProviderJson.Text(account, "display_name") ?? "Claude";
                 plan = ProviderJson.Text(org, "organization_type")?.Replace("claude_", "") ?? plan;
                 if (ProviderJson.Text(org, "rate_limit_tier") is { } tier && System.Text.RegularExpressions.Regex.Match(tier, @"\d+x") is { Success: true } m) plan += " " + m.Value;
             }
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or OperationCanceledException) { token.ThrowIfCancellationRequested(); }
-        if (sessions.Read()?.Fingerprint != session.Fingerprint) return ProviderHttp.Failure(Id, null);
-        return new(Id, session.Fingerprint, name, email, plan, DateTimeOffset.UtcNow.ToString("O"), "ok", null, quotas);
+        if (!verified || sessions.Read()?.Fingerprint != session.Fingerprint) return ProviderHttp.Failure(Id, null);
+        return new(Id, identity ?? session.Fingerprint, name, email, plan, DateTimeOffset.UtcNow.ToString("O"), "ok", null, quotas);
     }
     internal static IReadOnlyList<ProviderQuota> Parse(JsonElement root)
     {

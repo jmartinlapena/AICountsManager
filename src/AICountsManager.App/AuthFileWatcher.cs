@@ -9,6 +9,7 @@ internal sealed class AuthFileWatcher : IDisposable
     private CancellationTokenSource _lifetime = new();
     private CancellationTokenSource? _debounce;
     private bool _disposed;
+    private bool _enabled = true;
 
     public AuthFileWatcher(
         string authPath,
@@ -37,6 +38,17 @@ internal sealed class AuthFileWatcher : IDisposable
         _watcher.Error += OnError;
     }
 
+    public void SetEnabled(bool enabled)
+    {
+        lock (_sync)
+        {
+            if (_disposed) return;
+            _enabled = enabled;
+            _watcher.EnableRaisingEvents = enabled;
+            if (!enabled) _debounce?.Cancel();
+        }
+    }
+
     public void ScheduleInitialReconciliation() => Schedule();
 
     private void OnChanged(object? sender, FileSystemEventArgs e) => Schedule();
@@ -54,7 +66,7 @@ internal sealed class AuthFileWatcher : IDisposable
         CancellationTokenSource debounce;
         lock (_sync)
         {
-            if (_disposed)
+            if (_disposed || !_enabled)
             {
                 return;
             }

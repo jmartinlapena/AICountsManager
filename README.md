@@ -1,14 +1,14 @@
 # AICountsManager
 
-[Repositorio](https://github.com/jmartinlapena/AICountsManager) · [Validación de la versión 3.0.1](docs/VALIDATION-3.0.1.md)
+[Repositorio](https://github.com/jmartinlapena/AICountsManager) · [Organización local al cambiar de cuenta](docs/LOCAL-ORGANIZATION.md)
 
 Gestor ligero de cuentas y consumo de herramientas de IA para la bandeja de Windows: Codex, Antigravity, Claude y Cursor.
 
-La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF dibuja el panel translúcido. Permite alternar entre sesiones locales de Codex sin una ventana permanente en la barra de tareas.
+La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF dibuja el panel translúcido. Permite alternar entre sesiones locales de Codex y Claude conservando la organización local de trabajo, sin una ventana permanente en la barra de tareas.
 
 ## Instalar sin compilar
 
-Usa `AICountsManager-3.0.1-win-x64-Setup.exe` en equipos Intel/AMD, o `win-arm64` en Windows ARM. Se instala para tu usuario, crea el acceso directo y permite desinstalar desde Configuración de Windows. No necesita administrador, SDK, Python ni instalar .NET: el runtime .NET 10 LTS viene incluido.
+Usa `AICountsManager-3.2.0-win-x64-Setup.exe` en equipos Intel/AMD, o `win-arm64` en Windows ARM. Se instala para tu usuario, crea el acceso directo y permite desinstalar desde Configuración de Windows. No necesita administrador, SDK, Python ni instalar .NET: el runtime .NET 10 LTS viene incluido.
 
 También se genera un `Portable.zip`: descomprime **todo** el ZIP y ejecuta `AICountsManager.exe`. No copies solo el EXE. Requiere Windows 10 2004 (19041) o posterior / Windows 11; no funciona en macOS o Linux.
 
@@ -18,11 +18,11 @@ Los paquetes no incluyen cuentas del desarrollador ni credenciales. Se generan S
 
 ## Proveedores y recursos
 
-Claude y Cursor están desactivados por defecto. Se activan individualmente en Ajustes, igual que Antigravity. Solo Codex cambia cuentas; el resto consulta la sesión actual. [Contratos, fuentes y límites de la integración](docs/PROVIDERS.md).
+Claude y Cursor están desactivados por defecto. Se activan individualmente en Ajustes, igual que Antigravity. Codex y Claude gestionan varias cuentas; Antigravity y Cursor consultan la sesión actual. [Alta, cambio y recuperación de cuentas](docs/CLAUDE-ACCOUNTS.md). [Contratos, fuentes y límites de la integración](docs/PROVIDERS.md).
 
 Sin servicios, procesos auxiliares permanentes, bibliotecas de gráficos, telemetría ni nuevos temporizadores. Las cuotas reutilizan el ciclo de cinco minutos. Los históricos solo se leen al abrir/actualizar el panel; desactivar un proveedor evita sus lecturas y peticiones. WPF continúa creándose al primer uso.
 
-Para Codex se requiere su instalación y autenticación en archivo (`cli_auth_credentials_store = "file"`). Claude necesita un inicio de sesión de Claude Code; Cursor, el de su aplicación. Las sesiones externas caducadas se renuevan desde sus clientes, sin que AICountsManager escriba sus credenciales.
+Para Codex se requiere su instalación y autenticación en archivo (`cli_auth_credentials_store = "file"`). Claude necesita un inicio de sesión de Claude Code o Claude Desktop en Windows; Cursor, el de su aplicación. Las sesiones externas caducadas se renuevan desde sus clientes. AICountsManager solo sustituye la sesión de Claude durante una acción explícita de alta, activación o cancelación.
 
 ## Requisitos de desarrollo
 
@@ -43,7 +43,8 @@ Solo el equipo que genera las versiones necesita el SDK .NET 10 de `global.json`
 - Clic derecho: muestra la opcion `Salir`.
 - El botón Activar cambia al perfil guardado, con confirmación previa.
 - Actualizar (o F5) consulta las cuotas de todas las cuentas guardadas y actualiza el histórico local de tokens. Escape oculta el panel.
-- Si Codex esta abierto, el cambio lo cierra normalmente, espera a que terminen sus procesos, preserva la generacion final de la cuenta saliente, instala la cuenta entrante y vuelve a abrirlo.
+- El cambio requiere que el cliente correspondiente esté cerrado. No abre ni cierra aplicaciones automáticamente y no depende de los otros proveedores.
+- Al activar otra cuenta guardada, su organización local se sustituye por la de la cuenta saliente: proyectos y chats locales de Codex, e índices de sesiones de Code en Claude Desktop. No copia carpetas ni transcripciones. [Alcance, respaldo y recuperación](docs/LOCAL-ORGANIZATION.md).
 - Si Codex esta cerrado, el cambio preserva la sesión sin abrir la aplicación; el modo estricto puede usar un app-server temporal.
 - Un watcher de `auth.json` guarda inmediatamente las renovaciones de tokens en el perfil que coincide por identidad.
 - Cada 5 minutos solo se actualizan los porcentajes de la cuenta activa. Esta tarea no copia `auth.json`, no guarda perfiles y no crea backups.
@@ -91,7 +92,7 @@ Solo el equipo que genera las versiones necesita el SDK .NET 10 de `global.json`
 - Todos los porcentajes de cuotas y previsiones se muestran como enteros, igual que Codex. Los cálculos internos conservan su precisión; por ejemplo, 99,9934 % se presenta como 100 %.
 - `QuotaDisplay` es la implementación común para porcentajes, anchura de barras, posición de la referencia semanal, resets y previsión. Las tarjetas de Codex y de proveedores externos consumen el mismo resultado; las ventanas de cinco horas no muestran ritmo semanal.
 - `IQuotaProvider` adapta únicamente la consulta y normalización de cada plataforma. `QuotaQuery` comparte plazo/cancelación y valida el tipo de solicitud. El registro de proveedores comparte caché, errores, actualización y ajustes; cualquier adaptador registrado aparece automáticamente en el menú de conexión, los ajustes y el orden conjunto.
-- Solo Codex acepta perfiles guardados y permite cambiar de cuenta. Los demás adaptadores consultan su sesión actual y no muestran acciones de activación; el registro rechaza capacidades de cambio de cuenta externas. Google/Antigravity sigue siendo el único proveedor externo real implementado.
+- Codex y Claude admiten perfiles guardados. El registro de consultas de sesiones actuales permanece separado de los gestores de cuentas. Antigravity y Cursor siguen siendo de solo consulta.
 - Sin procesos auxiliares, temporizadores ni sondeos adicionales. Los históricos siguen aislados por origen.
 
 ## Orden conjunto y ritmo semanal (2.3.1)
@@ -106,22 +107,26 @@ Solo el equipo que genera las versiones necesita el SDK .NET 10 de `global.json`
 
 - Codex conserva los perfiles, orden, cambio de cuenta, verificación, actualización conjunta y recuperación de errores. Sus credenciales y cachés mantienen el formato existente.
 - `IQuotaProvider`, `QuotaRequest`, `ProviderUsage` y `ProviderQuota` separan la consulta y el resultado común de los protocolos de cada proveedor. `QuotaQuery` aplica una cancelación/plazo común de 12 s; `CurrentProviderRegistry` registra consultas de sesiones actuales, aísla fallos y limita su concurrencia a dos. El lote manual mantiene un presupuesto global de 60 s. Un adaptador conserva el cliente y la semántica de cuotas de Codex.
-- Antigravity consulta directamente Google Cloud Code con la sesión `gemini:antigravity` del Administrador de credenciales de Windows. No necesita que la aplicación esté abierta. Si el acceso ha caducado o Google lo rechaza, se renueva mediante OAuth; los tokens derivados se conservan solo en memoria y se invalidan al cambiar/desaparecer la credencial original. No se modifica la credencial de Antigravity. Los fallos de red y 429 no provocan renovaciones. Las conexiones remotas validan TLS y rechazan redirecciones.
+- Las cuotas de Antigravity priorizan `daily-cloudcode-pa.googleapis.com` para cuentas `consumer`/personales. Las identificadas como empresariales (`business`, `enterprise`, `gcp`, `oauth-business`) priorizan `cloudcode-pa.googleapis.com`; el otro servidor completa ventanas ausentes o actúa como respaldo. El porcentaje y el reset de cada ventana se conservan juntos, sin sumar ni reemplazar una lectura válida del servidor preferido por otra de un servidor distinto.
+- «NEW», junto a 5 h o Semanal, identifica una lectura reciente con consumo exactamente cero y una ventana completa desde la fecha de consulta (tolerancia de un minuto). Un 100 % redondeado no basta. «RESET» indica que venció la fecha guardada y falta actualizar; no se inventa el nuevo saldo. Los avisos se recalculan con el reloj del panel, que se detiene al ocultarlo, sin consultas, animaciones ni temporizadores nuevos.
+- Antigravity consulta directamente Google Cloud Code con la sesión `gemini:antigravity` del Administrador de credenciales de Windows. No necesita que la aplicación esté abierta. Si el acceso ha caducado o Google lo rechaza, se renueva mediante OAuth; los tokens derivados se conservan solo en memoria y se invalidan al cambiar/desaparecer la credencial original. Se admiten las credenciales con `id_token` y el formato actual con `id_token_email`, también con envoltura `go-keyring-base64`. No se modifica la credencial de Antigravity. Los fallos de red y 429 no provocan renovaciones. Las conexiones remotas validan TLS y rechazan redirecciones.
 - El servidor local es un respaldo si no hay credencial compatible y un complemento de hasta 2 segundos para cuotas adicionales no expuestas por Google, solo cuando coincide la identidad. El descubrimiento WMI y la tabla TCP se leen solo al actualizar, fuera del hilo de interfaz. Las solicitudes se limitan a puertos de ese proceso en `127.0.0.1`, sin proxy ni redirecciones. La excepción de certificado autofirmado se limita a HTTPS de loopback. La identidad se comprueba antes y después de leer las cuotas; sesiones diferentes no se mezclan.
 - La tarjeta reproduce Gemini semanal/5 h, Claude-GPT semanal/5 h y Gemini 4 Argon semanal cuando está disponible. Cada ventana conserva su reset y porcentaje restante. No se infiere acceso a Argon a partir del plan ni se interpreta un dato ausente como 0 o 100 %.
-- Es necesario haber iniciado sesión en Antigravity al menos una vez. No se inicia, cierra ni cambia su cuenta desde AICountsManager. Si la consulta falla, se identifica la última lectura como antigua; una cuenta distinta reemplaza la lectura anterior completa. `+` permite guardar Codex o conectar Antigravity actual; Ajustes permite desactivar Antigravity. Solo Codex muestra acciones de sesión.
+- Es necesario haber iniciado sesión en Antigravity al menos una vez. No se inicia, cierra ni cambia su cuenta desde AICountsManager. Si la consulta falla, se identifica la última lectura como antigua; una cuenta distinta reemplaza la lectura anterior completa. `+` permite añadir Codex o Claude, o conectar otros proveedores actuales. Ajustes permite activar y desactivar todos los proveedores.
 - La barra superior `Hoy / Semana / Cuotas` reúne los tokens diarios, los tokens semanales y el resumen por proveedor en un mismo recuadro. La vista inicial es `Hoy`; el histórico conserva sus flechas de navegación, selección de días y desglose por modelos. La rosquilla reparte los tokens registrados de la semana natural actual (lunes a hoy) entre proveedores: un segmento por proveedor, incluyendo todos los modelos de Antigravity. No usa ni suma porcentajes de cuota; las cuotas siguen en las tarjetas de las cuentas. Los colores identifican al proveedor. Los proveedores sin uso no generan segmentos y el historial incompleto se indica como parcial.
 - Las barras diarias de tokens apilan los modelos de cada proveedor; la suma sigue siendo diaria y transversal a las cuentas. Se conservan Hoy/Semana, navegación, selección del día y modelos. Los modelos se identifican por proveedor y nombre, también en «otros modelos»: nunca se atribuyen tokens de Codex a Antigravity ni se deducen tokens de un porcentaje de cuota. El estado conserva `sin historial local` cuando falta la fuente; el desglose de modelos omite proveedores desconocidos y filas sin tokens en el periodo seleccionado.
 - Antigravity lee `~/.gemini/antigravity*/conversations/*.db`, solo `gen_metadata.data` y la fecha en `steps.metadata`, con SQLite incluido en Windows (`winsqlite3.dll`). Se extraen los campos de contabilidad protobuf, nunca se conservan mensajes. Se suman entrada, prompt de sistema, salida y caché leída. Los registros sin fecha válida no se asignan a un día ficticio. El último tramo se relee para capturar generaciones que se completan, reemplazándolas por índice en vez de sumarlas de nuevo.
 - El índice de Antigravity usa la misma retención de 365 días, caché persistente de hasta 8 MiB, hasta 1.024 fuentes/100.000 generaciones, blobs de hasta 1 MiB y bloques de lectura de 8 MiB/aproximadamente 750 ms. Las bases sin cambios no se vuelven a consultar. Cancelación y recuperación aprovechan el flujo existente del histórico; no hay vigilancia continua ni temporizadores nuevos. El tiempo de una operación SQLite/E/S en curso y la agregación/escritura pueden exceder el presupuesto suave del bloque.
 - Nuevos archivos locales: `cache/provider-antigravity.json`, `config/provider-antigravity.json`, `cache/antigravity_history.json`. No contienen CSRF ni OAuth; las cuotas incluyen únicamente métricas y metadatos de identificación visibles.
-- Claude y Cursor quedan como futuras integraciones; no se presentan como clientes ya soportados. Claude dentro de Antigravity es un grupo de cuota de Antigravity.
+- Claude y Cursor tienen adaptadores propios. Claude dentro de Antigravity continúa siendo un grupo de cuota de Antigravity, separado de la cuenta directa de Claude.
 - Verificación de protocolo y fuente del histórico: [documentación de Antigravity en OpenUsage](https://github.com/robinebers/openusage/blob/main/docs/providers/antigravity.md). Se ha consultado su código y el servidor local instalado, sin instalar ni ejecutar OpenUsage. Logos vectoriales con fondo transparente procedentes de sus recursos MIT: atribución/licencia en `assets/provider-icons-LICENSE.txt`. La interfaz y el código de integración Windows son propios.
 - Los endpoints y el formato de Antigravity no son una API pública estable. Si cambian, se informa de la ausencia de datos y se conserva Codex operativo.
 
 ## Gestion de perfiles
 
-- `Añadir cuenta` guarda la cuenta activa actual como perfil.
+- `+ → Añadir cuenta de Codex` pide un nombre nuevo, conserva primero la sesión actual (aunque todavía no estuviera guardada) y deja preparado Codex sin sesión para que lo abras y completes un nuevo inicio de sesión. No duplica las credenciales anteriores bajo el nombre nuevo ni genera tokens ficticios.
+- El alta pendiente se captura por eventos de `auth.json` y sobrevive a un reinicio del gestor. `Cancelar alta` restaura la cuenta anterior; si el nuevo inicio de sesión ya terminó, conserva esa nueva cuenta. Las cuentas existentes no se borran ni se revocan.
+- Ajustes → Proveedores permite desactivar también Codex: oculta sus cuentas e histórico, detiene su watcher y evita consultas y exploraciones del historial. Los perfiles y su orden se conservan y se recuperan al activarlo. Completa o cancela un alta antes de desactivar su proveedor.
 - El menú `…` de cada cuenta permite renombrar o eliminar un perfil.
 - `Verificar la sesión antes de abrir Codex` activa el modo estricto. Este llama temporalmente a `account/read` con `refreshToken: true`; el modo rapido difiere esa comprobacion hasta que Codex se abra.
 - `Abrir carpeta de datos`, dentro de Ajustes, abre el almacenamiento local.
@@ -148,7 +153,7 @@ Cierra la aplicación anterior. Conserva la ruta de datos indicada en Ajustes �
 
 - No guarda contrasenas.
 - No muestra el contenido de `auth.json`.
-- No registra tokens: los logs y el diario usan solamente huellas SHA-256 abreviadas o completas.
+- No registra tokens en los logs. El diario de Codex usa huellas; la recuperación de Claude guarda una copia cifrada con DPAPI.
 - No implementa un inicio de sesión OAuth propio. Antigravity puede renovar en memoria su acceso existente para consultar cuotas con el cliente cerrado.
 - Nunca ejecuta `logout`, porque esa operacion puede revocar credenciales.
 - No rota cuentas automaticamente.
@@ -164,7 +169,7 @@ La asociacion entre el `auth.json` activo y un perfil se realiza con los identif
 
 Si una verificacion estricta devuelve `refresh_token_invalidated`, la aplicacion restaura la cuenta saliente y ofrece preparar la cuenta de destino para reautenticacion. Tras un login correcto, el watcher captura el nuevo `auth.json` sin esperar al temporizador de consumo.
 
-El diario transaccional no contiene tokens y permite reconciliar un cambio interrumpido. Si la identidad activa no pertenece a ningun perfil guardado, AICountsManager no la sobrescribe: exige guardarla primero.
+El diario transaccional de Codex no contiene tokens y permite reconciliar un cambio interrumpido. Si la identidad activa no pertenece a ningun perfil guardado, AICountsManager no la sobrescribe: exige guardarla primero.
 
 ## Desarrollo
 
@@ -202,7 +207,7 @@ pwsh ./scripts/build_release.ps1
 pwsh ./scripts/build_release.ps1 -Dotnet C:/herramientas/dotnet.exe -Iscc 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe'
 ```
 
-Ejecuta las pruebas y genera ambas arquitecturas en `artifacts/releases/3.0.0/`: instaladores, ZIP portables, manifiestos y `SHA256SUMS.txt`. Comprueba versión de DLL, arquitectura del EXE y dependencias autocontenidas. En la arquitectura del equipo ejecuta `--self-test`: carga WPF, icono y SQLite sin abrir perfiles ni iniciar la bandeja. No modifica la instalación en ejecución. Para repetir una versión, retira primero su carpeta de salida o incrementa la versión.
+Ejecuta las pruebas y genera ambas arquitecturas en `artifacts/releases/3.1.0/`: instaladores, ZIP portables, manifiestos y `SHA256SUMS.txt`. Comprueba versión de DLL, arquitectura del EXE y dependencias autocontenidas. En la arquitectura del equipo ejecuta `--self-test`: carga WPF, icono y SQLite sin abrir perfiles ni iniciar la bandeja. No modifica la instalación en ejecución. Para repetir una versión, retira primero su carpeta de salida o incrementa la versión.
 
 `-SigningThumbprint` y `-SignTool` permiten firmar aplicación e instalador con un certificado de publicación. Sin ellos, el manifiesto registra `Signed: false`. El proceso ya no depende del hash de un EXE aceptado en un ordenador concreto.
 

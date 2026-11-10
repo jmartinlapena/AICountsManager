@@ -113,17 +113,42 @@ internal sealed class ProviderOverview : C.Border
     }
 }
 
-internal sealed class CurrentProviderCard : C.Border
+internal sealed class CurrentProviderCard : C.Border, IDisposable
 {
     private UiTheme _theme;
     private ProviderUsage? _account;
+    private readonly C.ContextMenu _menu = new();
+    private readonly List<C.Button> _actions = [];
+    public event Func<string, Task>? ActivateRequested, RenameRequested, DeleteRequested;
+    public bool MenuOpen => _menu.IsOpen;
+    public void SetBusy(bool busy) { foreach (var action in _actions) action.IsEnabled = !busy; if (busy) _menu.IsOpen = false; }
+    public void Dispose() { _menu.IsOpen = false; _menu.Items.Clear(); _menu.PlacementTarget = null; ActivateRequested = RenameRequested = DeleteRequested = null; Child = null; }
     public CurrentProviderCard(UiTheme theme) { _theme = theme; CornerRadius = new(11); Padding = new(12, 10, 12, 11); Margin = new(0, 0, 0, 8); BorderThickness = new(1); BorderBrush = M.Brushes.Transparent; }
     public void SetTheme(UiTheme theme) { _theme = theme; if (_account is not null) Update(_account); }
     public void Update(ProviderUsage account)
     {
+        _menu.IsOpen = false; _menu.Items.Clear(); _actions.Clear();
         _account = account; W.Automation.AutomationProperties.SetName(this, "Cuenta " + ProviderIds.Name(account.Provider) + " · " + account.Name); Background = UiTheme.Brush(_theme.Dark ? M.Colors.White : M.Colors.Black, 10);
         var stack = new C.StackPanel(); Child = stack;
-        var header = new C.DockPanel { Margin = new(0, 0, 0, 9) }; header.Children.Add(ProviderIcons.Create(account.Provider, _theme));
+        var header = new C.DockPanel { Margin = new(0, 0, 0, 9) };
+        if (account.Provider == ProviderIds.Claude && account.ProfileId is { } id)
+        {
+            var actions = new C.StackPanel { Orientation = C.Orientation.Horizontal, VerticalAlignment = W.VerticalAlignment.Top };
+            if (!account.IsActive)
+            {
+                var activate = new C.Button { Content = "Activar", FontSize = 10, Padding = new W.Thickness(6, 3, 6, 3), MinHeight = 24 };
+                activate.Click += async (_, _) => { if (ActivateRequested is { } action) await action(id); }; actions.Children.Add(activate); _actions.Add(activate);
+            }
+            else actions.Children.Add(new C.TextBlock { Text = "● Activa", FontSize = 9.5, Margin = new W.Thickness(0, 5, 4, 0), Foreground = UiTheme.Brush(ProviderIcons.Color(account.Provider, _theme)) });
+            var more = new C.Button { Content = "…", Width = 24, Padding = new W.Thickness(0), MinHeight = 24 }; _actions.Add(more);
+            AccountMenuStyle.Apply(_menu);
+            var rename = new C.MenuItem { Header = "Renombrar" }; rename.Click += async (_, _) => { if (RenameRequested is { } action) await action(id); };
+            var delete = new C.MenuItem { Header = "Eliminar perfil", IsEnabled = !account.IsActive }; delete.Click += async (_, _) => { if (DeleteRequested is { } action) await action(id); };
+            _menu.Items.Add(rename); _menu.Items.Add(delete);
+            more.Click += (_, _) => { _menu.PlacementTarget = more; _menu.IsOpen = true; }; actions.Children.Add(more);
+            C.DockPanel.SetDock(actions, C.Dock.Right); header.Children.Add(actions);
+        }
+        header.Children.Add(ProviderIcons.Create(account.Provider, _theme));
         var identity = new C.StackPanel();
         var title = new C.Grid { HorizontalAlignment = W.HorizontalAlignment.Left };
         title.ColumnDefinitions.Add(new C.ColumnDefinition());
@@ -153,7 +178,7 @@ internal sealed class CurrentProviderCard : C.Border
             foreach (var q in group)
             {
                 var used = q.CurrentUsed;
-                var display = QuotaDisplay.Create(q.Window, used is double consumed ? 100 - consumed : null, account.Fresh, DateTimeOffset.UtcNow);
+                var display = QuotaDisplay.Create(q.Window, used is double consumed ? 100 - consumed : null, account.Fresh, DateTimeOffset.UtcNow, account.CheckedAt);
                 var line = new C.DockPanel { Margin = new(0, quotaIndex++ == 0 ? 0 : 10, 0, 6) };
                 if (display.Pace is not null)
                 {
@@ -162,7 +187,10 @@ internal sealed class CurrentProviderCard : C.Border
                         Foreground = UiTheme.Brush(display.AtRisk ? _theme.Warning : _theme.Muted) };
                     C.DockPanel.SetDock(forecast, C.Dock.Right); line.Children.Add(forecast);
                 }
-                line.Children.Add(new C.TextBlock { Text = q.Label, FontSize = 11, FontWeight = W.FontWeights.SemiBold, TextTrimming = W.TextTrimming.CharacterEllipsis }); stack.Children.Add(line);
+                var heading = new C.StackPanel { Orientation = C.Orientation.Horizontal };
+                heading.Children.Add(new C.TextBlock { Text = q.Label, FontSize = 11, FontWeight = W.FontWeights.SemiBold, TextTrimming = W.TextTrimming.CharacterEllipsis });
+                var badge = new QuotaResetBadge(); badge.Update(display.ResetNotice, _theme, color); heading.Children.Add(badge);
+                line.Children.Add(heading); stack.Children.Add(line);
                 var grid = new C.Grid { Height = 4 }; grid.Children.Add(new C.Border { Background = UiTheme.Brush(_theme.Text, _theme.Dark ? (byte)26 : (byte)22), CornerRadius = new(2) });
                 var fill = new C.Border { Background = UiTheme.Brush(color), CornerRadius = new(2), HorizontalAlignment = W.HorizontalAlignment.Left };
                 grid.SizeChanged += (_, _) => fill.Width = display.FillWidth(grid.ActualWidth); grid.Children.Add(fill);

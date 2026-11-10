@@ -187,7 +187,7 @@ internal static partial class Program
         var monday = HistoryPanel.Monday(DateOnly.FromDateTime(DateTime.Today));
         var expected = SampleHistory().Days.Where(d => DateOnly.Parse(d.Date) >= monday).Sum(d => (decimal)d.Total);
         Check(overview.Series.Single(s => s.Provider == ProviderIds.Codex).Tokens == expected && overview.Series.Single(s => s.Provider == ProviderIds.Antigravity).Tokens == 300, "Summary did not use weekly tokens isolated by provider.");
-        var card = UiField<Dictionary<string,CurrentProviderCard>>(form,"_externalRows")[ProviderIds.Antigravity];
+        var card = UiField<Dictionary<string,CurrentProviderCard>>(form,"_externalRows")[AccountOrdering.Current(ProviderIds.Antigravity)];
         static bool HasButton(W.DependencyObject x) => x is C.Button || Enumerable.Range(0,M.VisualTreeHelper.GetChildrenCount(x)).Any(i => HasButton(M.VisualTreeHelper.GetChild(x,i)));
         Check(!HasButton(card), "Antigravity account exposes actions.");
         var historyPanel = UiField<HistoryPanel>(form, "_historyPanel");

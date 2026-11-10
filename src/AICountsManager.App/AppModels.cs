@@ -87,7 +87,7 @@ internal sealed record AppConfig(
     string? ActiveProfile,
     string? LastUpdatedAt,
     bool StrictVerification = false,
-    IReadOnlyList<string>? ProfileOrder = null, IReadOnlyList<string>? AccountOrder = null);
+    IReadOnlyList<string>? ProfileOrder = null, IReadOnlyList<string>? AccountOrder = null, bool CodexEnabled = true);
 
 internal sealed record ProfileMeta(
     string Name,
@@ -142,7 +142,8 @@ internal sealed record ProfileState(
     UsageWindow? SessionWindow = null,
     UsageWindow? WeeklyWindow = null,
     string? PlanType = null,
-    bool SessionLimitNotApplicable = false);
+    bool SessionLimitNotApplicable = false,
+    string? CheckedAt = null);
 
 internal sealed record DashboardState(
     ProfileState ActiveProfile,

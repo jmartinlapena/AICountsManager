@@ -67,7 +67,7 @@ internal static partial class Program
         ("equal timestamp rotation is captured", EqualTimestampRotationIsCapturedAsync),
         ("watcher captures a refreshed generation", WatcherCapturesRefreshAsync),
         ("closed switch preserves outgoing credentials", ClosedSwitchPreservesOutgoingAsync),
-        ("open switch closes and restarts Codex", OpenSwitchClosesAndRestartsAsync),
+        ("open Codex blocks switching without closing or restarting clients", OpenSwitchClosesAndRestartsAsync),
         ("strict invalidation restores previous account", StrictInvalidationRestoresPreviousAsync),
         ("strict refresh is captured immediately", StrictRefreshIsCapturedAsync),
         ("unknown live account is never closed or overwritten", UnknownLiveAccountIsProtectedAsync),
@@ -83,10 +83,46 @@ internal static partial class Program
         ("usage errors preserve last successful observation", UsageErrorsPreserveObservationAsync),
         ("file mode is written outside TOML tables", FileModeIsRootSettingAsync),
         ("cards are reused and removed controls disposed", UiCardLifetimeAsync),
+        ("Codex disable preserves accounts and eliminates background queries", CodexProviderToggleAsync),
+        ("Codex account creation preserves and captures a different login", CodexEnrollmentCaptureAsync),
+        ("Codex pending account survives restart and cancels reversibly", CodexEnrollmentRecoveryAsync),
+        ("Codex account creation rejects duplicate names and the outgoing identity", CodexEnrollmentBoundariesAsync),
+        ("Codex enrollment refuses running clients and preserves a concurrent completed login", CodexEnrollmentFailureAsync),
+        ("Codex disabled watcher stays idle and catches up on enable", CodexDisabledWatcherAsync),
+        ("Claude Desktop and terminal archive round-trip preserves settings and history", ClaudeArchiveRoundTripAsync),
+        ("Claude archive rolls back every interrupted write and refuses unsafe state", ClaudeArchiveRollbackAsync),
+        ("Claude named accounts capture, switch, refresh, cancel and persist", ClaudeAccountsLifecycleAsync),
+        ("Claude mismatched Desktop and terminal identities are preserved", ClaudeMixedIdentityAsync),
+        ("Claude accounts share add menu and ordering without touching open Codex", ClaudeAccountsUiAsync),
+        ("Antigravity host selection keeps active consumer and business quotas", AntigravityHostSelectionAsync),
+        ("Antigravity host failures preserve fallback and Retry-After", AntigravityHostFallbackAsync),
+        ("quota reset notices distinguish expired, unused and rounded readings", QuotaResetStatesAsync),
+        ("quota reset badges are shared, static and update across provider cards", QuotaResetUiAsync),
+        ("organization Codex A-B-A replaces local metadata and preserves account scopes", CodexOrganizationRoundTripAsync),
+        ("organization Codex switch couples metadata with credential rollback", CodexOrganizationSwitchAsync),
+        ("organization Claude A-B-A replaces indices without copying histories", ClaudeOrganizationRoundTripAsync),
+        ("organization Claude switch is atomic and quota refresh stays independent", ClaudeOrganizationSwitchAsync),
+        ("organization journal recovers all partial writes and preserves newer target edits", OrganizationRecoveryAsync),
+        ("organization Codex startup reconciles interrupted changes", CodexOrganizationRecoveryAsync),
+        ("organization client races defer recovery until closed", OrganizationClientRaceAsync),
+        ("organization refuses ambiguous indices, outside paths and concurrent edits", OrganizationBoundariesAsync),
+        ("Claude Desktop selection respects accounts, expiry and logout", ClaudeDesktopSelectionAsync),
+        ("Claude Desktop Windows storage stays read-only and falls back from CLI", ClaudeDesktopStorageAsync),
+        ("Claude Desktop verifies live account and organization", ClaudeDesktopIdentityAsync),
     ];
 
     public static async Task<int> Main(string[] args)
     {
+        if (args is ["--probe-organization-copies", var codexCopyHome, var claudeCopyHome, var orgReport]) { await ProbeOrganizationCopiesAsync(codexCopyHome, claudeCopyHome, orgReport); return 0; }
+        if (args is ["--organization-tests"]) { foreach (var t in Tests.Where(t => t.Name.StartsWith("organization "))) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--render-reset-badges", var imagePath]) { await RenderQuotaResetAsync(imagePath); return 0; }
+        if (args is ["--reset-tests"]) { foreach (var t in Tests.Where(t => t.Name.StartsWith("Antigravity host") || t.Name.StartsWith("quota reset"))) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--probe-claude-archive", var archiveSource]) { await ProbeRealClaudeArchiveAsync(archiveSource); return 0; }
+        if (args is ["--measure-claude-idle", var idleOutput]) { await MeasureManagedClaudeIdleAsync(idleOutput); return 0; }
+        if (args is ["--claude-account-tests"]) { foreach (var t in Tests.Skip(80).Take(5)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--account-flow-tests"]) { foreach (var t in Tests.Skip(74).Take(6)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--probe-claude-desktop", var desktop]) { await ProbeClaudeDesktopAsync(desktop); return 0; }
+        if (args is ["--claude-desktop-tests"]) { foreach (var t in Tests.TakeLast(3)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
         if (args is ["--render-gemini-first-day", var geminiImage]) { await RenderGeminiFirstDayAsync(geminiImage); return 0; }
         if (args is ["--probe-refresh-storage-failure"]) { await RefreshStorageFailureAsync(); return 0; }
         if (args is ["--probe-tray-providers"]) { await ProbeTrayRefreshAsync(antigravity: true); return 0; }
@@ -303,10 +339,9 @@ internal static partial class Program
             using var service = CreateService(paths, process: process);
             var result = await service.SwitchToProfileAsync("AccountB");
 
-            Check(result.Status == SwitchProfileStatus.Success, result.Message);
-            Check(process.CloseCalls == 1, "Codex was not closed normally exactly once.");
-            Check(process.RestartCalls == 1 && process.Running, "Codex was not restarted.");
-            Check((await Read(paths.ActiveAuthPath)).Identity.Matches(accountB.Identity), "Restarted Codex has the wrong account.");
+            Check(result.Status == SwitchProfileStatus.CodexStillRunning, result.Message);
+            Check(process.CloseCalls == 0 && process.RestartCalls == 0 && process.Running, "A blocked switch touched the client.");
+            Check((await Read(paths.ActiveAuthPath)).Identity.Matches(accountA.Identity), "A blocked switch changed credentials.");
         });
     }
 

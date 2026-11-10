@@ -112,9 +112,17 @@
       <ScrollViewer x:Name="AccountsScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,5,0" CanContentScroll="False">
         <StackPanel x:Name="DashboardStack">
         <StackPanel x:Name="AccountList"/>
+        <StackPanel x:Name="EnrollmentPanel" Visibility="Collapsed" Margin="10,12">
+          <TextBlock x:Name="EnrollmentLabel" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource Muted}"/>
+          <Button x:Name="CancelEnrollmentButton" Content="Cancelar alta" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+        </StackPanel>
+      <StackPanel x:Name="ClaudeEnrollmentPanel" Visibility="Collapsed" Margin="10,12">
+          <TextBlock x:Name="ClaudeEnrollmentLabel" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource Muted}"/>
+          <Button x:Name="CancelClaudeEnrollmentButton" Content="Cancelar alta de Claude" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+        </StackPanel>
       <StackPanel x:Name="EmptyPanel" VerticalAlignment="Center" Visibility="Collapsed" Margin="16,22">
         <TextBlock Text="Tu primera cuenta" FontSize="16" FontWeight="SemiBold" TextAlignment="Center"/>
-        <TextBlock Text="Inicia sesión en Codex y guarda tu perfil para tenerlo siempre a mano." Foreground="{DynamicResource Muted}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,8,0,0"/>
+        <TextBlock Text="Pulsa + para añadir una cuenta y completar el inicio de sesión." Foreground="{DynamicResource Muted}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,8,0,0"/>
       </StackPanel>
         </StackPanel>
       </ScrollViewer>
@@ -122,7 +130,7 @@
         <StackPanel Margin="0,4,4,0">
           <TextBlock Text="Proveedores" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,10"/>
           <StackPanel x:Name="ProviderToggles"/>
-          <TextBlock Text="Consulta los límites de la sesión guardada. El cambio de cuenta sigue disponible solo para Codex." Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,16"/>
+          <TextBlock Text="Consulta todas las cuentas guardadas. Codex y Claude permiten cambiar de cuenta cuando su aplicación está cerrada." Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,16"/>
           <TextBlock Text="Orden de las cuentas" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,6"/>
           <TextBlock Text="Usa las flechas. El orden se conserva al cambiar de cuenta." Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/>
           <StackPanel x:Name="OrderList" Margin="0,0,0,14"/>

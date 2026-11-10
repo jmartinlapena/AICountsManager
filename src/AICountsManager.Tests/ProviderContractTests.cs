@@ -73,7 +73,7 @@ internal static partial class Program
         using var form = new WidgetForm(service, new UiTheme(true,false,false), false); form.ApplyState(service.BuildDashboardState()); form.ShowSettings(true);
         Check(form.Visual.Title == "AICountsManager" && ((C.TextBlock)form.Visual.FindName("TitleLabel")).Text == "AICountsManager", "The window or header has an outdated product name.");
         var toggles = UiField<Dictionary<string,C.CheckBox>>(form,"_providerToggles");
-        Check(toggles.Count == 2 && toggles.ContainsKey("future-client"), "Registered adapter missing from generic settings.");
+        Check(toggles.Count == 3 && toggles.ContainsKey(ProviderIds.Codex) && toggles.ContainsKey("future-client"), "Registered adapter missing from generic settings.");
         Check(UiField<C.ContextMenu>(form,"_addMenu").Items.OfType<C.MenuItem>().Any(m => m.Header.ToString()!.Contains("future-client")), "Registered adapter missing from add menu.");
         Check(((C.StackPanel)form.Visual.FindName("OrderList")).Children.Count == 2, "Registered adapters missing from unified ordering.");
         toggles["future-client"].IsChecked = false; toggles["future-client"].RaiseEvent(new W.RoutedEventArgs(C.Primitives.ButtonBase.ClickEvent));

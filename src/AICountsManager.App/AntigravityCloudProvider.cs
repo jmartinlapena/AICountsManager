@@ -5,7 +5,7 @@ using System.Text.Json.Nodes;
 
 namespace AICountsManager;
 
-internal sealed record AntigravityCredential(string Fingerprint, string Access, string Refresh, DateTimeOffset Expiry, string Email, string Name);
+internal sealed record AntigravityCredential(string Fingerprint, string Access, string Refresh, DateTimeOffset Expiry, string Email, string Name, string? AuthMethod = null);
 internal interface IAntigravityCredentials { AntigravityCredential? Read(); }
 internal sealed class WindowsAntigravityCredentials : IAntigravityCredentials
 {
@@ -17,20 +17,37 @@ internal sealed class WindowsAntigravityCredentials : IAntigravityCredentials
             var credential = Marshal.PtrToStructure<Credential>(pointer);
             if (credential.Size is 0 or > 65536) return null;
             var bytes = new byte[credential.Size]; Marshal.Copy(credential.Blob, bytes, 0, bytes.Length);
+            return Parse(bytes);
+        }
+        finally { CredFree(pointer); }
+    }
+    internal static AntigravityCredential? Parse(byte[] bytes)
+    {
+        if (bytes.Length is 0 or > 65536) return null;
+        try
+        {
             var text = Encoding.UTF8.GetString(bytes).TrimEnd('\0');
             if (text.StartsWith("go-keyring-base64:")) text = Encoding.UTF8.GetString(Convert.FromBase64String(text[18..]));
             var root = JsonNode.Parse(text); var token = root?["token"];
-            var id = root?["id_token"]?.GetValue<string>()?.Split('.');
-            if (id is not { Length: 3 }) return null;
-            var encoded = id[1].Replace('-', '+').Replace('_', '/');
-            var claims = JsonNode.Parse(Convert.FromBase64String(encoded.PadRight((encoded.Length + 3) / 4 * 4, '=')));
-            var email = claims?["email"]?.GetValue<string>();
+            JsonNode? claims = null;
+            if (root?["id_token"]?.GetValue<string>() is { Length: > 0 } idToken)
+            {
+                var id = idToken.Split('.');
+                if (id.Length != 3) return null;
+                var encoded = id[1].Replace('-', '+').Replace('_', '/');
+                claims = JsonNode.Parse(Convert.FromBase64String(encoded.PadRight((encoded.Length + 3) / 4 * 4, '=')));
+            }
+            // Recent Antigravity versions store the identity email instead of the ID token.
+            var storedEmail = root?["id_token_email"]?.GetValue<string>();
+            var claimsEmail = claims?["email"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(storedEmail) && !string.IsNullOrWhiteSpace(claimsEmail)
+                && !string.Equals(storedEmail, claimsEmail, StringComparison.OrdinalIgnoreCase)) return null;
+            var email = string.IsNullOrWhiteSpace(claimsEmail) ? storedEmail : claimsEmail;
             if (string.IsNullOrWhiteSpace(email)) return null;
             DateTimeOffset.TryParse(token?["expiry"]?.GetValue<string>(), out var expiry);
-            return new(AuthHash.Bytes(bytes), token?["access_token"]?.GetValue<string>() ?? "", token?["refresh_token"]?.GetValue<string>() ?? "", expiry, email, claims?["name"]?.GetValue<string>() ?? "Antigravity");
+            return new(AuthHash.Bytes(bytes), token?["access_token"]?.GetValue<string>() ?? "", token?["refresh_token"]?.GetValue<string>() ?? "", expiry, email, claims?["name"]?.GetValue<string>() ?? "Antigravity", root?["auth_method"]?.GetValue<string>());
         }
         catch (Exception ex) when (ex is System.Text.Json.JsonException or FormatException or InvalidOperationException) { return null; }
-        finally { CredFree(pointer); }
     }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct Credential
@@ -80,9 +97,9 @@ internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentia
                 var refreshed = false;
                 if (string.IsNullOrEmpty(_access) || _expiry <= DateTimeOffset.UtcNow.AddSeconds(30))
                 { await Refresh(credential, token).ConfigureAwait(false); refreshed = true; }
-                var quotas = await ReadQuotas(token).ConfigureAwait(false);
+                var quotas = await ReadQuotas(credential.AuthMethod, token).ConfigureAwait(false);
                 if (quotas.Status is 401 or 403 && !refreshed)
-                { await Refresh(credential, token).ConfigureAwait(false); quotas = await ReadQuotas(token).ConfigureAwait(false); }
+                { await Refresh(credential, token).ConfigureAwait(false); quotas = await ReadQuotas(credential.AuthMethod, token).ConfigureAwait(false); }
                 if (quotas.Status is 401 or 403) return Missing("La sesión de Antigravity ha caducado. Vuelve a iniciar sesión en Antigravity.");
                 if (quotas.Status == 429) return Missing("Google ha limitado las consultas. Espera antes de actualizar.") with { HttpStatus = 429, RetryAfterSeconds = 60 };
                 if (quotas.Values is null) return Missing("No se pudo consultar Google. Inténtalo de nuevo más tarde.");
@@ -134,15 +151,24 @@ internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentia
         var lifetime = response.Json?["expires_in"] is JsonValue seconds && seconds.TryGetValue<int>(out var n) ? Math.Clamp(n, 1, 86400) : 3600;
         _expiry = DateTimeOffset.UtcNow.AddSeconds(lifetime);
     }
-    private async Task<(int Status, IReadOnlyList<ProviderQuota>? Values)> ReadQuotas(CancellationToken token)
+    internal static IReadOnlyList<string> QuotaHosts(string? authMethod) =>
+        authMethod?.ToLowerInvariant() is "business" or "enterprise" or "gcp" or "oauth-business"
+            ? ["cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"]
+            : ["daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"];
+
+    private async Task<(int Status, IReadOnlyList<ProviderQuota>? Values)> ReadQuotas(string? authMethod, CancellationToken token)
     {
         List<ProviderQuota>? values = null;
-        foreach (var host in new[] { "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com" })
+        int? refusal = null;
+        foreach (var host in QuotaHosts(authMethod))
         {
             (int Status, JsonNode? Json) response;
             try { response = await Post("https://" + host + "/v1internal:retrieveUserQuotaSummary", new StringContent("{}", Encoding.UTF8, "application/json"), true, token).ConfigureAwait(false); }
-            catch (HttpRequestException) { continue; }
-            if (response.Status is 401 or 403 or 429) return (response.Status, null);
+            catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException
+                || ex is OperationCanceledException && !token.IsCancellationRequested) { continue; }
+            // A token may be valid only on its metered deployment. A 429 still stops the batch.
+            if (response.Status == 429) return (429, null);
+            if (response.Status is 401 or 403) { refusal ??= response.Status; continue; }
             if (response.Status != 200) continue;
             var parsed = AntigravityQuotaProvider.ParseSummary(response.Json);
             if (parsed is null) continue;
@@ -155,7 +181,7 @@ internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentia
             }
             if (values.Count >= 5 && values.All(q => q.UsedPercent is not null)) break;
         }
-        return (values is null ? 503 : 200, values);
+        return (values is null ? refusal ?? 503 : 200, values);
     }
     private async Task<(int Status, JsonNode? Json)> Post(string url, HttpContent content, bool bearer, CancellationToken token)
     {

@@ -17,7 +17,7 @@ internal sealed record ProviderQuota(string Id, string Group, string Label, doub
 }
 internal sealed record ProviderUsage(string Provider, string? Identity, string Name, string? Email, string? Plan,
     string? CheckedAt, string Status, string? Error, IReadOnlyList<ProviderQuota> Quotas,
-    int? HttpStatus = null, int? RetryAfterSeconds = null, bool SessionLimitNotApplicable = false)
+    int? HttpStatus = null, int? RetryAfterSeconds = null, bool SessionLimitNotApplicable = false, string? ProfileId = null, bool IsActive = false)
 {
     public static ProviderUsage Unavailable(string provider, string error) => new(provider, null, ProviderIds.Name(provider), null, null, null, "error", error, []);
     public bool Fresh => Status == "ok" && DateTimeOffset.TryParse(CheckedAt, out var t) && DateTimeOffset.UtcNow - t < TimeSpan.FromMinutes(15);
@@ -37,7 +37,7 @@ internal static class QuotaQuery
     public static async Task<ProviderUsage> ReadAsync(IQuotaProvider provider, QuotaRequest request, CancellationToken token)
     {
         if (provider.Id == ProviderIds.Codex ? request is not CodexQuotaRequest : request is not CurrentQuotaRequest || provider.CanSwitchAccounts)
-            throw new InvalidOperationException("Solo Codex admite consultas de perfiles guardados y cambio de cuenta.");
+            throw new InvalidOperationException("Solicitud incompatible con el adaptador de cuotas.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(12));
         return await provider.ReadAsync(request, deadline.Token).ConfigureAwait(false);

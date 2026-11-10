@@ -6,12 +6,13 @@ internal static class AccountOrdering
     public static string Codex(string name) => "codex:" + name;
     // External adapters expose one current-session slot; changing that session keeps its position.
     public static string Current(string provider) => "provider:" + provider;
+    public static string For(ProviderUsage account) => account.ProfileId is null ? Current(account.Provider) : account.Provider + ":" + account.ProfileId;
     public static IReadOnlyList<OrderedAccount> Resolve(IReadOnlyList<ProfileState> profiles, IReadOnlyList<ProviderUsage>? other, IReadOnlyList<string>? order)
     {
         var ranks = (order ?? []).Select((id, index) => (id, index)).GroupBy(x => x.id, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().index, StringComparer.OrdinalIgnoreCase);
         return profiles.Select(p => new OrderedAccount(Codex(p.Name), ProviderIds.Codex, p.Name, p.Email))
-            .Concat((other ?? []).Select(p => new OrderedAccount(Current(p.Provider), p.Provider, p.Name, p.Email)))
+            .Concat((other ?? []).Select(p => new OrderedAccount(For(p), p.Provider, p.Name, p.Email)))
             .OrderBy(p => ranks.GetValueOrDefault(p.Id, int.MaxValue)).ToArray();
     }
     // Disabled provider slots retain their position when the visible accounts are rearranged.

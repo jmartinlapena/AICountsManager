@@ -286,7 +286,7 @@ internal sealed class ProfileRepository
                 NormalizeProfileNameOrNull(ReadString(node, "ActiveProfile", "active_profile", "activeProfile")),
                 ReadString(node, "LastUpdatedAt", "last_updated_at", "lastUpdatedAt"),
                 ReadBool(node, "StrictVerification", "strict_verification") ?? false,
-                ReadProfileOrder(node), ReadAccountOrder(node));
+                ReadProfileOrder(node), ReadAccountOrder(node), ReadBool(node, "CodexEnabled") ?? true);
         }
         catch
         {

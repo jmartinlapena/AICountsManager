@@ -55,15 +55,21 @@ internal sealed class WidgetForm : IDisposable
         var dashboard = Find<C.StackPanel>("DashboardStack");
         dashboard.Children.Insert(0, _overview);
         AccountMenuStyle.Apply(_addMenu);
-        var codexAdd = new C.MenuItem { Header = "Guardar cuenta de Codex" };
-        codexAdd.Click += async (_, _) => await AddAsync();
+        var codexAdd = new C.MenuItem { Header = "Añadir cuenta de Codex" };
+        codexAdd.Click += async (_, _) => await AddAsync(ProviderIds.Codex);
         _addMenu.Items.Add(codexAdd);
+        if (_service.CanManageClaude)
+        {
+            var claudeAdd = new C.MenuItem { Header = "Añadir cuenta de Claude" };
+            claudeAdd.Click += async (_, _) => await AddAsync(ProviderIds.Claude);
+            _addMenu.Items.Add(claudeAdd);
+        }
         foreach (var provider in _service.CurrentProviders)
         {
             var item = new C.MenuItem { Header = "Conectar " + provider.Name + " actual" };
             item.Click += async (_, _) => await RunAsync(async () => { await _service.SetCurrentProviderEnabledAsync(provider.Id, true); UpdateHistoryPanels(_service.History); return provider.Name + " conectado."; });
-            _addMenu.Items.Add(item);
-            var toggle = new C.CheckBox { Content = provider.Name + " · sesión actual" };
+            if (provider.Id != ProviderIds.Codex && !(provider.Id == ProviderIds.Claude && _service.CanManageClaude)) _addMenu.Items.Add(item);
+            var toggle = new C.CheckBox { Content = provider.Name };
             toggle.Click += async (_, _) =>
             {
                 if (!_applying) await RunAsync(async () => { await _service.SetCurrentProviderEnabledAsync(provider.Id, toggle.IsChecked == true); UpdateHistoryPanels(_service.History); return "Proveedor actualizado."; });
@@ -84,7 +90,7 @@ internal sealed class WidgetForm : IDisposable
         };
         _window.Deactivated += (_, _) => _window.Dispatcher.BeginInvoke(() =>
         {
-            if (!IsDisposed && !_window.IsActive && !_dialogOpen && !_addMenu.IsOpen && !_rows.Values.Any(r => r.MenuOpen))
+            if (!IsDisposed && !_window.IsActive && !_dialogOpen && !_addMenu.IsOpen && !_rows.Values.Any(r => r.MenuOpen) && !_externalRows.Values.Any(r => r.MenuOpen))
                 HideRequested?.Invoke(this, EventArgs.Empty);
         }, Threading.DispatcherPriority.Background);
         _window.PreviewKeyDown += async (_, e) =>
@@ -94,6 +100,8 @@ internal sealed class WidgetForm : IDisposable
         };
         Click("RefreshButton", async () => await RefreshAsync());
         Click("SettingsButton", () => ShowSettings(!_settingsVisible));
+        Click("CancelClaudeEnrollmentButton", async () => await RunAsync(async () => { await _service.CancelClaudeAccountAsync(); return "Alta terminada. Sesiones conservadas."; }));
+        Click("CancelEnrollmentButton", async () => await RunAsync(async () => { await _service.CancelCodexAccountAsync(); return "Alta terminada. Sesiones conservadas."; }));
         Click("AddButton", () => { _addMenu.PlacementTarget = Find<C.Button>("AddButton"); _addMenu.IsOpen = true; });
         Click("FolderButton", () =>
         {
@@ -186,19 +194,29 @@ internal sealed class WidgetForm : IDisposable
                 }
                 row.Update(profile, _busy);
             }
+            Find<C.StackPanel>("EnrollmentPanel").Visibility = _service.PendingCodexName is null ? W.Visibility.Collapsed : W.Visibility.Visible;
+            Find<C.TextBlock>("EnrollmentLabel").Text = "Codex · " + _service.PendingCodexName + "\nCompleta el inicio de sesión en Codex.";
+            Find<C.StackPanel>("ClaudeEnrollmentPanel").Visibility = _service.PendingClaudeName is null ? W.Visibility.Collapsed : W.Visibility.Visible;
+            Find<C.TextBlock>("ClaudeEnrollmentLabel").Text = "Claude · " + _service.PendingClaudeName + "\nInicia sesión y cierra Claude para terminar de guardar la cuenta.";
             var others = state.OtherAccounts ?? [];
-            foreach (var old in _externalRows.Keys.Where(k => !others.Any(a => a.Provider == k)).ToArray())
-            { stack.Children.Remove(_externalRows[old]); _externalRows.Remove(old); }
+            foreach (var old in _externalRows.Keys.Where(k => !others.Any(a => AccountOrdering.For(a) == k)).ToArray())
+            { stack.Children.Remove(_externalRows[old]); _externalRows[old].Dispose(); _externalRows.Remove(old); }
             foreach (var other in others)
             {
-                if (!_externalRows.TryGetValue(other.Provider, out var card)) { card = new CurrentProviderCard(_theme); _externalRows[other.Provider] = card; }
-                card.Update(other);
+                var key = AccountOrdering.For(other);
+                if (!_externalRows.TryGetValue(key, out var card))
+                {
+                    card = new CurrentProviderCard(_theme);
+                    card.ActivateRequested += ClaudeSwitchAsync; card.RenameRequested += ClaudeRenameAsync; card.DeleteRequested += ClaudeDeleteAsync;
+                    _externalRows[key] = card;
+                }
+                card.Update(other); card.SetBusy(_busy);
             }
             var ordered = state.OrderedAccounts;
             for (var position = 0; position < ordered.Count; position++)
             {
                 var account = ordered[position];
-                W.UIElement card = account.Provider == ProviderIds.Codex ? _rows[account.Name] : _externalRows[account.Provider];
+                W.UIElement card = account.Provider == ProviderIds.Codex ? _rows[account.Name] : _externalRows[account.Id];
                 if (stack.Children.IndexOf(card) != position) { stack.Children.Remove(card); stack.Children.Insert(position, card); }
             }
             foreach (var provider in _service.CurrentProviders) _providerToggles[provider.Id].IsChecked = provider.Enabled;
@@ -274,6 +292,9 @@ internal sealed class WidgetForm : IDisposable
     {
         _busy = busy;
         foreach (var name in new[] { "AddButton", "RefreshButton", "FileModeButton", "StartupToggle", "StrictToggle" }) Find<C.Control>(name).IsEnabled = !busy;
+        Find<C.Button>("CancelEnrollmentButton").IsEnabled = !busy;
+        Find<C.Button>("CancelClaudeEnrollmentButton").IsEnabled = !busy;
+        foreach (var card in _externalRows.Values) card.SetBusy(busy);
         foreach (var toggle in _providerToggles.Values) toggle.IsEnabled = !busy;
         foreach (var row in _rows.Values) row.SetBusy(busy);
         Find<C.StackPanel>("OrderList").IsEnabled = !busy;
@@ -352,11 +373,16 @@ internal sealed class WidgetForm : IDisposable
         }
         finally { _historyReading = false; _historyCancellation = null; if (!IsDisposed && Visible && cancellation.IsCancellationRequested) _historyTimer.Start(); }
     }
-    private async Task AddAsync()
+    private async Task AddAsync(string provider)
     {
         if (_busy) return;
-        var name = AskName("Añadir cuenta", "Nombre para la sesión actual", "Nueva cuenta"); if (name is null) return;
-        await RunAsync(async () => { await _service.AddCurrentProfileAsync(name); return "Cuenta guardada."; });
+        var name = AskName("Añadir cuenta de " + ProviderIds.Name(provider), "Nombre de la nueva cuenta. Cierra primero esta aplicación. Conservaremos tu sesión actual; después podrás abrirla e iniciar sesión con la nueva cuenta.", "Nueva cuenta"); if (name is null) return;
+        await RunAsync(async () =>
+        {
+            if (!_service.CurrentProviders.Single(p => p.Id == provider).Enabled) await _service.SetCurrentProviderEnabledAsync(provider, true);
+            if (provider == ProviderIds.Codex) return await _service.BeginCodexAccountAsync(name);
+            await _service.BeginClaudeAccountAsync(name); return "Abre Claude, inicia sesión y ciérralo para terminar el alta.";
+        });
     }
     private async Task RenameAsync(string name)
     {
@@ -372,7 +398,7 @@ internal sealed class WidgetForm : IDisposable
     private async Task SwitchAsync(string name)
     {
         if (_busy) return;
-        var detail = _service.IsCodexRunning() ? "Se guardará la sesión actual, Codex se cerrará normalmente y volverá a abrirse con esta cuenta." : "Se guardará la sesión actual y se activará esta cuenta. Codex permanecerá cerrado.";
+        var detail = "Codex debe estar cerrado. Se guardará la sesión actual y se activará esta cuenta sin abrir ninguna aplicación.";
         if (!Confirm("Cambiar de cuenta", $"Vas a activar «{name}».\n\n{detail}", "Activar")) return;
         await RunAsync(async () =>
         {
@@ -381,6 +407,23 @@ internal sealed class WidgetForm : IDisposable
             if (result.Status != SwitchProfileStatus.Success) throw new InvalidOperationException(result.Message);
             return result.Message;
         });
+    }
+    private async Task ClaudeSwitchAsync(string id)
+    {
+        if (_busy || !Confirm("Cambiar cuenta de Claude", "Claude Desktop y sus sesiones de terminal deben estar cerrados. Se conservará la cuenta actual y se activará la seleccionada. Codex no se verá afectado.", "Activar")) return;
+        await RunAsync(async () => { await _service.SwitchClaudeAccountAsync(id); return "Cuenta de Claude activada. La aplicación permanece cerrada."; });
+    }
+    private async Task ClaudeRenameAsync(string id)
+    {
+        if (_busy) return;
+        var current = _state?.OtherAccounts?.FirstOrDefault(a => a.ProfileId == id)?.Name ?? "Claude";
+        var name = AskName("Renombrar cuenta de Claude", "Nombre del perfil", current); if (name is null) return;
+        await RunAsync(async () => { await _service.RenameClaudeAccountAsync(id, name); return "Nombre actualizado."; });
+    }
+    private async Task ClaudeDeleteAsync(string id)
+    {
+        if (_busy || !Confirm("Eliminar perfil de Claude", "Se retirará este perfil del gestor y se conservará una copia cifrada local. Tu cuenta de Claude no se eliminará.", "Eliminar")) return;
+        await RunAsync(async () => { await _service.DeleteClaudeAccountAsync(id); return "Perfil retirado. Copia local conservada."; });
     }
     private void ShowError(string text)
     {
@@ -424,6 +467,7 @@ internal sealed class WidgetForm : IDisposable
     {
         if (IsDisposed) return;
         IsDisposed = true; _addMenu.IsOpen = false; _addMenu.Items.Clear(); _lifetime.Cancel(); _historyTimer.Stop(); _clock.Stop(); _source?.RemoveHook(WindowMessage);
+        foreach (var card in _externalRows.Values) card.Dispose(); _externalRows.Clear();
         foreach (var row in _rows.Values) row.Dispose(); _rows.Clear(); _window.Close(); _lifetime.Dispose();
     }
 }
@@ -443,6 +487,7 @@ internal sealed class AccountRow : C.Border, IDisposable
     private readonly C.MenuItem _rename = new() { Header = "Renombrar" }, _delete = new() { Header = "Eliminar perfil" };
     private readonly C.Border[] _tracks = [new(), new()], _fills = [new(), new()];
     private readonly C.Border[] _markers = [new(), new()];
+    private readonly QuotaResetBadge[] _resetBadges = [new(), new()];
     private readonly C.TextBlock[] _forecast = [Text(9.5), Text(9.5)];
     private readonly C.TextBlock[] _percent = [Text(12, true), Text(12, true)], _reset = [Text(9.5), Text(9.5)];
     public bool IsDisposed { get; private set; }
@@ -478,7 +523,9 @@ internal sealed class AccountRow : C.Border, IDisposable
             var section = _quotaSections[i]; stack.Children.Add(section);
             var line = new C.DockPanel { Margin = new W.Thickness(0, 0, 0, 6) };
             _forecast[i].HorizontalAlignment = W.HorizontalAlignment.Right; C.DockPanel.SetDock(_forecast[i], C.Dock.Right); line.Children.Add(_forecast[i]);
-            var caption = Text(11, true); caption.Text = i == 0 ? "Sesión · 5 h" : "Semanal"; line.Children.Add(caption); section.Children.Add(line);
+            var caption = Text(11, true); caption.Text = i == 0 ? "Sesión · 5 h" : "Semanal";
+            var heading = new C.StackPanel { Orientation = C.Orientation.Horizontal };
+            heading.Children.Add(caption); heading.Children.Add(_resetBadges[i]); line.Children.Add(heading); section.Children.Add(line);
             _tracks[i].Height = 4; _tracks[i].CornerRadius = new W.CornerRadius(2);
             _fills[i].CornerRadius = new W.CornerRadius(2); _fills[i].HorizontalAlignment = W.HorizontalAlignment.Left;
             var bar = new C.Grid(); bar.Children.Add(_fills[i]);
@@ -527,11 +574,12 @@ internal sealed class AccountRow : C.Border, IDisposable
     {
         var remaining = index == 0 ? _profile?.SessionRemainingPercent : _profile?.WeeklyRemainingPercent;
         var window = index == 0 ? _profile?.SessionWindow : _profile?.WeeklyWindow;
-        var display = QuotaDisplay.Create(window, remaining, _profile?.Status == "ok", DateTimeOffset.UtcNow);
+        var display = QuotaDisplay.Create(window, remaining, _profile?.Status == "ok", DateTimeOffset.UtcNow, _profile?.CheckedAt);
         _percent[index].Text = display.RemainingText + (remaining.HasValue ? " restante" : "");
         _reset[index].Text = display.ResetText ?? (index == 0 ? _profile?.SessionResetLabel : _profile?.WeeklyResetLabel) ?? "Sin fecha";
         _fills[index].Width = display.FillWidth(_tracks[index].ActualWidth);
         var color = index == 0 ? _theme.Accent : _theme.WeeklyAccent;
+        _resetBadges[index].Update(display.ResetNotice, _theme, color);
         _fills[index].Background = _percent[index].Foreground = UiTheme.Brush(color);
         _markers[index].Visibility = display.Reference is null ? W.Visibility.Collapsed : W.Visibility.Visible;
         if (display.Reference is not null) _markers[index].Margin = new W.Thickness(display.MarkerOffset(_tracks[index].ActualWidth), -2, 0, -2);

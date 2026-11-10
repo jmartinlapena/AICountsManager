@@ -25,6 +25,34 @@ internal static partial class Program
     private static async Task CloudQuotaAsync()
     {
         var credentials = new CloudCredentials(); var handler = new CloudHandler(); using var http = new HttpClient(handler);
+        var current = new JsonObject
+        {
+            ["token"] = new JsonObject { ["access_token"] = "access-one", ["refresh_token"] = "refresh-one", ["expiry"] = DateTimeOffset.UtcNow.AddHours(1).ToString("O") },
+            ["auth_method"] = "oauth", ["id_token_email"] = "a@example.test"
+        };
+        var bytes = System.Text.Encoding.UTF8.GetBytes(current.ToJsonString());
+        var unchanged = bytes.ToArray();
+        credentials.Value = WindowsAntigravityCredentials.Parse(bytes);
+        Check(credentials.Value is { Email: "a@example.test", Access: "access-one", Refresh: "refresh-one", Name: "Antigravity" }
+            && credentials.Value.Expiry > DateTimeOffset.UtcNow && bytes.SequenceEqual(unchanged), "Current email-only credential was rejected or modified.");
+        var fallback = new FakeQuotaProvider { Result = SampleAntigravity() };
+        var currentProvider = new AntigravityCloudProvider(credentials, http, fallback, () => false);
+        var direct = await currentProvider.ReadAsync(new CurrentQuotaRequest(), default);
+        Check(direct.Status == "ok" && direct.Quotas.Count == 5 && fallback.Calls == 0 && handler.Refreshes == 0,
+            "Current credential format required the running application or a token renewal.");
+        var wrapped = System.Text.Encoding.UTF8.GetBytes("go-keyring-base64:" + Convert.ToBase64String(bytes) + "\0");
+        Check(WindowsAntigravityCredentials.Parse(wrapped)?.Email == "a@example.test", "Wrapped current credentials were rejected.");
+        var claims = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("{\"email\":\"a@example.test\",\"name\":\"A\"}")).TrimEnd('=').Replace('+','-').Replace('/','_');
+        current.Remove("id_token_email"); current["id_token"] = "fixture." + claims + ".fixture";
+        var legacy = WindowsAntigravityCredentials.Parse(System.Text.Encoding.UTF8.GetBytes(current.ToJsonString()));
+        Check(legacy is { Email: "a@example.test", Name: "A", Access: "access-one" }, "Legacy ID-token credential compatibility was lost.");
+        current["id_token_email"] = "different@example.test";
+        Check(WindowsAntigravityCredentials.Parse(System.Text.Encoding.UTF8.GetBytes(current.ToJsonString())) is null, "Conflicting credential identities were accepted.");
+        current.Remove("id_token"); current.Remove("id_token_email");
+        Check(WindowsAntigravityCredentials.Parse(System.Text.Encoding.UTF8.GetBytes(current.ToJsonString())) is null
+            && WindowsAntigravityCredentials.Parse("{broken"u8.ToArray()) is null
+            && WindowsAntigravityCredentials.Parse(new byte[65537]) is null, "Missing identity, malformed or oversized credentials were accepted.");
+        credentials.Value = legacy;
         var provider = new AntigravityCloudProvider(credentials, http);
         var read = await provider.ReadAsync(new CurrentQuotaRequest(), default);
         Check(read.Status == "ok" && read.Quotas.Count == 5 && read.Email == "a@example.test" && handler.Refreshes == 0, "Direct query required app or refreshed valid token.");
@@ -54,11 +82,11 @@ internal static partial class Program
         Check((await provider.ReadAsync(new CurrentQuotaRequest(), default)).Status == "error" && handler.Refreshes == 0, "Outage triggered OAuth refresh.");
         handler.Reply = _ => new(HttpStatusCode.TooManyRequests);
         Check((await provider.ReadAsync(new CurrentQuotaRequest(), default)).HttpStatus == 429 && handler.Refreshes == 0, "Rate limit ignored.");
-        var rejected = false;
+        var rejected = 0;
         handler.Reply = request =>
         {
             if (request.RequestUri!.Host == "oauth2.googleapis.com") return JsonResponse(new JsonObject { ["access_token"] = "renewed", ["expires_in"] = 3600 });
-            if (!rejected) { rejected = true; return new(HttpStatusCode.Unauthorized); }
+            if (++rejected <= 2) return new(HttpStatusCode.Unauthorized);
             return JsonResponse(QuotaPayload());
         };
         Check((await provider.ReadAsync(new CurrentQuotaRequest(), default)).Status == "ok" && handler.Refreshes == 1, "401 did not refresh once.");

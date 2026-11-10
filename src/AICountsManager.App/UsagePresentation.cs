@@ -50,16 +50,34 @@ internal static class UsagePresentation
         : count >= 1_000_000 ? $"{count / 1e6:0.##}M" : count >= 1000 ? $"{count / 1e3:0.#}k" : count.ToString("N0");
 }
 
+internal enum QuotaResetNotice { None, Expected, Unused }
+
 // All account cards use the same display calculations. Provider adapters only supply data.
-internal sealed record QuotaDisplay(double? Remaining, string RemainingText, string? ResetText, double? Reference, QuotaPace? Pace)
+internal sealed record QuotaDisplay(double? Remaining, string RemainingText, string? ResetText, double? Reference, QuotaPace? Pace,
+    QuotaResetNotice ResetNotice = QuotaResetNotice.None)
 {
+    internal static QuotaResetNotice ResetState(UsageWindow? window, bool fresh, DateTimeOffset now, string? checkedAt)
+    {
+        if (window?.WindowDurationMins is not (300 or 10080) || window.ResetsAt is not long reset
+            || reset <= 0 || reset > DateTimeOffset.MaxValue.ToUnixTimeSeconds()) return QuotaResetNotice.None;
+        // Retain an expired reading as an estimate; never invent its new balance or reset.
+        if (reset <= now.ToUnixTimeSeconds()) return QuotaResetNotice.Expected;
+        if (!fresh || window.UsedPercent != 0) return QuotaResetNotice.None;
+        var observed = now;
+        if (checkedAt is not null && !DateTimeOffset.TryParse(checkedAt, out observed)) return QuotaResetNotice.None;
+        if (observed > now.AddMinutes(1) || now - observed > TimeSpan.FromMinutes(15)) return QuotaResetNotice.None;
+        // Compare the full window with its observation time, not with the rounded label or the clock tick.
+        return Math.Abs(reset - observed.ToUnixTimeSeconds() - window.WindowDurationMins.Value * 60L) <= 60
+            ? QuotaResetNotice.Unused : QuotaResetNotice.None;
+    }
     public string ForecastText => Pace is null ? "" : UsagePresentation.Forecast(Pace);
     public bool AtRisk => Pace?.ProjectedUsed > 100;
     public double FillWidth(double width) => Math.Max(0, width * Math.Clamp(Remaining ?? 0, 0, 100) / 100);
     public double MarkerOffset(double width) => Math.Max(0, (width - 2) * (Reference ?? 0) / 100);
-    public static QuotaDisplay Create(UsageWindow? window, double? remaining, bool fresh, DateTimeOffset now) => new(
+    public static QuotaDisplay Create(UsageWindow? window, double? remaining, bool fresh, DateTimeOffset now, string? checkedAt = null) => new(
         remaining, remaining is double value ? UsagePresentation.Percent(value) : "Sin datos",
         window is null ? null : UsagePresentation.Countdown(window.ResetsAt, now),
         window is not null && fresh ? QuotaPace.WeeklyReference(window, now) : null,
-        window is not null && fresh ? QuotaPace.Calculate(window, now) : null);
+        window is not null && fresh ? QuotaPace.Calculate(window, now) : null,
+        ResetState(window, fresh, now, checkedAt));
 }

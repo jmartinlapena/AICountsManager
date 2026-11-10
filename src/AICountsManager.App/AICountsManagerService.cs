@@ -6,29 +6,51 @@ using System.Text.RegularExpressions;
 
 namespace AICountsManager;
 
-internal sealed class AICountsManagerService : IDisposable
+internal sealed partial class AICountsManagerService : IDisposable
 {
     private readonly AppPaths _paths;
     internal AppDiagnostics Diagnostics { get; }
     private readonly ProfileRepository _profiles;
     private readonly ICodexProcessController _processController;
+    private readonly LocalOrganizationTransfer _codexOrganization;
     private readonly ICodexAppServerClient _appServer;
     private readonly CodexQuotaProvider _codexProvider;
     private readonly CurrentProviderRegistry _otherProviders;
+    private readonly ClaudeAccounts? _claudeAccounts;
+    private IReadOnlyList<ProviderUsage> OtherAccounts => _otherProviders.Accounts.Concat(_claudeAccounts?.Accounts ?? []).ToArray();
+    internal bool CanManageClaude => _claudeAccounts is not null;
+    public string? PendingClaudeName => _claudeAccounts?.PendingName;
+    private bool ProviderEnabled(string id) => id == ProviderIds.Claude && _claudeAccounts is not null ? _claudeAccounts.Enabled : _otherProviders.IsEnabled(id);
     private readonly Dictionary<string, IProviderTokenHistory> _providerHistories;
     private readonly HttpClient _providerHttp = ProviderHttp.Create();
     public bool AntigravityEnabled => _otherProviders.IsEnabled(ProviderIds.Antigravity);
-    public IReadOnlyList<CurrentProviderSetting> CurrentProviders => _otherProviders.Settings;
+    private volatile bool _codexEnabled;
+    public bool CodexEnabled => _codexEnabled;
+    public IReadOnlyList<CurrentProviderSetting> CurrentProviders =>
+        new[] { new CurrentProviderSetting(ProviderIds.Codex, "Codex", _codexEnabled) }.Concat(_otherProviders.Settings).Concat(_claudeAccounts is null ? [] : new[] { new CurrentProviderSetting(ProviderIds.Claude, "Claude", _claudeAccounts.Enabled) }).ToArray();
     public Task SetAntigravityEnabledAsync(bool enabled) => SetCurrentProviderEnabledAsync(ProviderIds.Antigravity, enabled);
     public async Task SetCurrentProviderEnabledAsync(string id, bool enabled)
     {
-        await _otherProviders.SetEnabledAsync(id, enabled, CancellationToken.None);
+        if (id == ProviderIds.Codex)
+        {
+            await MutateProfilesAsync(() =>
+            {
+                if (!enabled) RequireNoEnrollment();
+                _profiles.SaveAppConfig(_profiles.LoadAppConfig() with { CodexEnabled = enabled, LastUpdatedAt = UtcNow() });
+                _codexEnabled = enabled;
+                _authWatcher?.SetEnabled(enabled);
+                return Task.CompletedTask;
+            }, CancellationToken.None);
+            if (enabled) { await ReconcileActiveAuthAsync(CancellationToken.None); await RefreshActiveProfileAsync(); }
+        }
+        else if (id == ProviderIds.Claude && _claudeAccounts is not null) await _claudeAccounts.SetEnabledAsync(enabled);
+        else await _otherProviders.SetEnabledAsync(id, enabled, CancellationToken.None);
         NotifyStateChanged();
     }
     public async Task RefreshCurrentProvidersAsync(CancellationToken token = default)
     {
         try { await RefreshActiveProfileAsync(token); }
-        finally { await _otherProviders.RefreshAsync(token); if (!_disposed) NotifyStateChanged(); }
+        finally { await _otherProviders.RefreshAsync(token); if (_claudeAccounts is not null) await _claudeAccounts.RefreshAsync(false, token); if (!_disposed) NotifyStateChanged(); }
     }
     private async Task<UsageRecord> ReadCodexUsageAsync(AuthSnapshot snapshot, CancellationToken token) =>
         CodexQuotaProvider.Legacy(await QuotaQuery.ReadAsync(_codexProvider, new CodexQuotaRequest(snapshot, _paths.CodexConfigPath), token));
@@ -43,17 +65,18 @@ internal sealed class AICountsManagerService : IDisposable
     {
         get
         {
-            var sources = new Dictionary<string, TokenHistorySnapshot> { [ProviderIds.Codex] = _history.Snapshot };
+            var sources = new Dictionary<string, TokenHistorySnapshot>();
+            if (_codexEnabled) sources[ProviderIds.Codex] = _history.Snapshot;
             foreach (var provider in _providerHistories)
-                if (_otherProviders.IsEnabled(provider.Key)) sources[provider.Key] = provider.Value.Snapshot;
-            return sources.Count == 1 ? _history.Snapshot : ProviderHistory.Merge(sources);
+                if (ProviderEnabled(provider.Key)) sources[provider.Key] = provider.Value.Snapshot;
+            return sources.Count == 1 && _codexEnabled ? _history.Snapshot : ProviderHistory.Merge(sources);
         }
     }
     public async Task<TokenHistorySnapshot> RefreshHistoryAsync(CancellationToken token = default)
     {
-        await _history.RefreshAsync(token);
+        if (_codexEnabled) await _history.RefreshAsync(token);
         foreach (var provider in _providerHistories)
-            if (_otherProviders.IsEnabled(provider.Key)) await provider.Value.RefreshAsync(token);
+            if (ProviderEnabled(provider.Key)) await provider.Value.RefreshAsync(token);
         return History;
     }
 
@@ -70,21 +93,28 @@ internal sealed class AICountsManagerService : IDisposable
         ICodexProcessController? processController,
         ICodexAppServerClient? appServer,
         IUsageClient? usageClient,
-        bool startWatcher, IQuotaProvider? currentProvider = null, string? geminiHome = null, IEnumerable<IQuotaProvider>? additionalProviders = null)
+        bool startWatcher, IQuotaProvider? currentProvider = null, string? geminiHome = null, IEnumerable<IQuotaProvider>? additionalProviders = null, ClaudeAccounts? claudeAccounts = null)
     {
         _paths = paths;
         Diagnostics = new AppDiagnostics(paths.LogsDir);
         _history = new TokenHistory(paths.CodexHome, Path.Combine(paths.AppHome, "cache", "token_history.json"));
         _paths.EnsureDirectories();
         _profiles = new ProfileRepository(paths, Log);
+        _codexEnabled = _profiles.LoadAppConfig().CodexEnabled;
+        LoadEnrollment();
         _processController = processController ?? new CodexProcessController();
+        _codexOrganization = new LocalOrganizationTransfer(new CodexOrganizationAdapter(paths.CodexHome), paths.TransactionsDir, paths.BackupsDir,
+            () => { if (_processController.CaptureState().IsRunning) throw new InvalidOperationException("Cierra Codex para trasladar su organización local."); });
         _appServer = appServer ?? new CodexAppServerClient(paths);
         _codexProvider = new CodexQuotaProvider(usageClient ?? new UsageClient());
         var current = currentProvider ?? (startWatcher ? AntigravityCloudProvider.Create() : null);
-        var claude = new ClaudeSessionSource(ClaudeSessionSource.Home);
+        var claude = new ClaudeSessionSource(ClaudeSessionSource.Home, new ClaudeDesktopSessionSource(ClaudeDesktopSessionSource.DirectoryPath));
         var cursor = new CursorSessionSource(CursorSessionSource.Database);
-        var extras = additionalProviders ?? (startWatcher ? new IQuotaProvider[] { new ClaudeQuotaProvider(claude, _providerHttp), new CursorQuotaProvider(cursor, _providerHttp) } : []);
+        var extras = additionalProviders ?? (startWatcher ? new IQuotaProvider[] { new CursorQuotaProvider(cursor, _providerHttp) } : []);
         _otherProviders = new CurrentProviderRegistry(paths, (current is null ? Array.Empty<IQuotaProvider>() : [current]).Concat(extras));
+        _claudeAccounts = claudeAccounts ?? (startWatcher && additionalProviders is null ? new ClaudeAccounts(paths.AppHome,
+            new ClaudeSessionArchive(ClaudeDesktopSessionSource.DirectoryPath, ClaudeSessionSource.Home, ClaudeSessionArchive.CodeConfigPath, Path.Combine(paths.TransactionsDir, "claude-rollback.bin"), _providerHttp),
+            _providerHttp, _profiles.SanitizeProfileName, NotifyStateChanged, Log) : null);
         _providerHistories = new()
         {
             [ProviderIds.Antigravity] = new AntigravityTokenHistory(geminiHome ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini"), Path.Combine(paths.AppHome, "cache", "antigravity_history.json")),
@@ -97,6 +127,12 @@ internal sealed class AICountsManagerService : IDisposable
             Task.Run(async () =>
             {
                 await _profiles.RecoverJournalAsync();
+                if (_codexOrganization.HasRecovery && !_processController.CaptureState().IsRunning)
+                {
+                    using var recoveryLock = new GlobalAuthSwitchLock(_paths.CodexHome);
+                    await recoveryLock.AcquireAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
+                    await RecoverCodexOrganizationAsync(CancellationToken.None);
+                }
                 await ReconcileActiveAuthAsync(CancellationToken.None);
             }).GetAwaiter().GetResult();
         }
@@ -108,14 +144,15 @@ internal sealed class AICountsManagerService : IDisposable
         if (startWatcher)
         {
             _authWatcher = new AuthFileWatcher(_paths.ActiveAuthPath, ReconcileActiveAuthAsync, Log);
-            _authWatcher.ScheduleInitialReconciliation();
+            _authWatcher.SetEnabled(_codexEnabled);
+            if (_codexEnabled) _authWatcher.ScheduleInitialReconciliation();
         }
         Log("AICountsManager iniciado con sincronizacion por eventos.", null);
     }
 
     public DashboardState BuildDashboardState()
     {
-        var profiles = _profiles.ListProfiles();
+        var profiles = _codexEnabled ? _profiles.ListProfiles() : Array.Empty<ProfileMeta>();
         var config = _profiles.LoadAppConfig();
         var activeMeta = profiles.FirstOrDefault(profile =>
             string.Equals(profile.Name, config.ActiveProfile, StringComparison.OrdinalIgnoreCase));
@@ -129,9 +166,9 @@ internal sealed class AICountsManagerService : IDisposable
                 GetUsage(usageCache, profile.Name),
                 string.Equals(profile.Name, activeMeta?.Name, StringComparison.OrdinalIgnoreCase)))
             .ToList();
-        var binary = CodexBinaryLocator.Find();
-        var runtime = _processController.CaptureState();
-        var settings = binary is null
+        var binary = _codexEnabled ? CodexBinaryLocator.Find() : null;
+        var runtime = _codexEnabled ? _processController.CaptureState() : new CodexRuntimeState(false, null, []);
+        var settings = !_codexEnabled ? "Codex desactivado · perfiles conservados" : binary is null
             ? "Codex no encontrado. Define CODEX_BINARY."
             : $"Watcher activo · Verificacion estricta: {(config.StrictVerification ? "si" : "no")}";
 
@@ -143,13 +180,14 @@ internal sealed class AICountsManagerService : IDisposable
             LogsFolder: _paths.LogsDir,
             StrictVerification: config.StrictVerification,
             CodexRunning: runtime.IsRunning,
-            UpdatedLabel: FormatRelative(usageCache.Accounts.Values.Select(u => u.CheckedAt).Concat(_otherProviders.Accounts.Select(a => a.CheckedAt))
+            UpdatedLabel: FormatRelative(usageCache.Accounts.Values.Select(u => u.CheckedAt).Concat(OtherAccounts.Select(a => a.CheckedAt))
                 .Where(value => DateTimeOffset.TryParse(value, out _)).OrderByDescending(value => DateTimeOffset.Parse(value!)).FirstOrDefault()),
-            OtherAccounts: _otherProviders.Accounts, AccountOrder: config.AccountOrder);
+            OtherAccounts: OtherAccounts, AccountOrder: config.AccountOrder);
     }
 
     public string BuildTrayTooltip(DashboardState state)
     {
+        if (!_codexEnabled) return "AICountsManager";
         var active = state.ActiveProfile;
         var session = active.SessionRemainingPercent.HasValue
             ? $"{active.SessionRemainingPercent.Value:0}% restante"
@@ -178,15 +216,15 @@ internal sealed class AICountsManagerService : IDisposable
     public Task SetAccountOrderAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default) =>
         MutateProfilesAsync(() =>
         {
-            var profiles = _profiles.ListProfiles();
-            var existing = profiles.Select(p => AccountOrdering.Codex(p.Name)).Concat(_otherProviders.Accounts.Select(a => AccountOrdering.Current(a.Provider))).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var profiles = _codexEnabled ? _profiles.ListProfiles() : Array.Empty<ProfileMeta>();
+            var existing = profiles.Select(p => AccountOrdering.Codex(p.Name)).Concat(OtherAccounts.Select(AccountOrdering.For)).ToHashSet(StringComparer.OrdinalIgnoreCase);
             if (ids.Count != existing.Count || ids.Distinct(StringComparer.OrdinalIgnoreCase).Count() != ids.Count || !existing.SetEquals(ids))
                 throw new InvalidOperationException("La lista de cuentas ha cambiado. Vuelve a ordenar las cuentas actuales.");
             var config = _profiles.LoadAppConfig();
             _profiles.SaveAppConfig(config with
             {
                 AccountOrder = AccountOrdering.ReplaceVisible(config.AccountOrder, ids),
-                ProfileOrder = ids.Where(id => id.StartsWith("codex:", StringComparison.OrdinalIgnoreCase)).Select(id => profiles.Single(p => string.Equals(AccountOrdering.Codex(p.Name), id, StringComparison.OrdinalIgnoreCase)).Name).ToArray(),
+                ProfileOrder = _codexEnabled ? ids.Where(id => id.StartsWith("codex:", StringComparison.OrdinalIgnoreCase)).Select(id => profiles.Single(p => string.Equals(AccountOrdering.Codex(p.Name), id, StringComparison.OrdinalIgnoreCase)).Name).ToArray() : config.ProfileOrder,
                 LastUpdatedAt = UtcNow()
             });
             return Task.CompletedTask;
@@ -205,6 +243,7 @@ internal sealed class AICountsManagerService : IDisposable
 
     public async Task<UsageRecord?> RefreshActiveProfileAsync(CancellationToken cancellationToken = default)
     {
+        if (!_codexEnabled) return null;
         if (!await _usageGate.WaitAsync(0, cancellationToken))
         {
             return null;
@@ -214,6 +253,7 @@ internal sealed class AICountsManagerService : IDisposable
         try
         {
             var config = _profiles.LoadAppConfig();
+            if (!_codexEnabled) return null;
             requestedProfile = config.ActiveProfile;
             if (string.IsNullOrWhiteSpace(config.ActiveProfile))
             {
@@ -271,15 +311,16 @@ internal sealed class AICountsManagerService : IDisposable
     public async Task<string> RefreshAllUsageAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        if (_pendingCodex is not null) await ReconcileActiveAuthAsync(cancellationToken);
         if (!await _usageGate.WaitAsync(0, cancellationToken)) return "Ya hay una actualización en curso.";
         try
         {
             if (DateTimeOffset.UtcNow < _nextBatchAllowed)
                 return "Espera " + UsagePresentation.Duration((_nextBatchAllowed - DateTimeOffset.UtcNow).TotalSeconds) + " antes de volver a consultar.";
-            var profiles = _profiles.ListProfiles();
+            var profiles = _codexEnabled ? _profiles.ListProfiles() : Array.Empty<ProfileMeta>();
             Diagnostics.Write("quota.batch.begin count=" + profiles.Count);
             AuthSnapshot? live = null;
-            try { if (File.Exists(_paths.ActiveAuthPath)) live = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken); }
+            try { if (_codexEnabled && File.Exists(_paths.ActiveAuthPath)) live = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken); }
             catch (Exception ex) when (ex is IOException or InvalidOperationException or UnauthorizedAccessException or JsonException) { }
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(TimeSpan.FromSeconds(60));
@@ -314,14 +355,14 @@ internal sealed class AICountsManagerService : IDisposable
             }
             if (!deadline.IsCancellationRequested)
             {
-                try { await _otherProviders.RefreshAsync(deadline.Token); }
+                try { await _otherProviders.RefreshAsync(deadline.Token); if (_claudeAccounts is not null) await _claudeAccounts.RefreshAsync(true, deadline.Token); }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
             }
             cancellationToken.ThrowIfCancellationRequested();
             _nextBatchAllowed = _nextBatchAllowed > DateTimeOffset.UtcNow ? _nextBatchAllowed : DateTimeOffset.UtcNow.AddSeconds(15);
             NotifyStateChanged();
             Diagnostics.Write($"quota.batch.complete completed={completed} failed={failed} limited={limited}");
-            if (profiles.Count == 0) return "Historial actualizado. Añade una cuenta para consultar sus cuotas.";
+            if (profiles.Count == 0) return OtherAccounts.Count != 0 ? "Actualización terminada. Consulta el resultado en cada cuenta." : "Historial actualizado. Añade una cuenta para consultar sus cuotas.";
             var text = $"{completed - failed}/{profiles.Count} cuentas actualizadas";
             if (failed > 0) text += $" · {failed} sin conexión o sesión válida";
             if (completed < profiles.Count) text += $" · {profiles.Count - completed} pendientes";
@@ -331,9 +372,23 @@ internal sealed class AICountsManagerService : IDisposable
         finally { _usageGate.Release(); }
     }
 
+    private async Task ClaudeMutationAsync(Func<ClaudeAccounts, Task> action)
+    {
+        if (_claudeAccounts is null) throw new InvalidOperationException("Claude no está disponible.");
+        await _switchGate.WaitAsync();
+        try { await action(_claudeAccounts); }
+        finally { _switchGate.Release(); NotifyStateChanged(); }
+    }
+    public Task BeginClaudeAccountAsync(string name) => ClaudeMutationAsync(c => c.BeginAsync(name));
+    public Task CancelClaudeAccountAsync() => ClaudeMutationAsync(c => c.CancelAsync());
+    public Task SwitchClaudeAccountAsync(string id) => ClaudeMutationAsync(c => c.SwitchAsync(id));
+    public Task RenameClaudeAccountAsync(string id, string name) => ClaudeMutationAsync(c => c.RenameAsync(id, name));
+    public Task DeleteClaudeAccountAsync(string id) => ClaudeMutationAsync(c => c.DeleteAsync(id));
+
     public Task AddCurrentProfileAsync(string profileName, CancellationToken cancellationToken = default) =>
         MutateProfilesAsync(async () =>
         {
+            RequireNoEnrollment();
             if (!File.Exists(_paths.ActiveAuthPath))
                 throw new InvalidOperationException("No existe una sesión activa de Codex para guardar.");
             var snapshot = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken);
@@ -346,6 +401,7 @@ internal sealed class AICountsManagerService : IDisposable
     public Task RenameProfileAsync(string currentName, string newName, CancellationToken cancellationToken = default) =>
         MutateProfilesAsync(() =>
         {
+            RequireNoEnrollment();
             _profiles.Rename(currentName, newName);
             return Task.CompletedTask;
         }, cancellationToken);
@@ -353,6 +409,7 @@ internal sealed class AICountsManagerService : IDisposable
     public Task DeleteProfileAsync(string profileName, CancellationToken cancellationToken = default) =>
         MutateProfilesAsync(async () =>
         {
+            RequireNoEnrollment();
             var config = _profiles.LoadAppConfig();
             if (string.Equals(config.ActiveProfile, profileName, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("No se puede eliminar el perfil activo. Cambia primero a otra cuenta.");
@@ -390,6 +447,13 @@ internal sealed class AICountsManagerService : IDisposable
         NotifyStateChanged();
     }
 
+    private async Task RecoverCodexOrganizationAsync(CancellationToken token)
+    {
+        if (!_codexOrganization.HasRecovery) return;
+        var active = File.Exists(_paths.ActiveAuthPath) ? await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: token) : null;
+        _codexOrganization.Recover(active?.Identity.Fingerprint);
+    }
+
     public Task<SwitchProfileResult> SwitchToProfileAsync(
         string profileName,
         CancellationToken cancellationToken = default) =>
@@ -407,15 +471,18 @@ internal sealed class AICountsManagerService : IDisposable
     {
         ThrowIfDisposed();
         profileName = _profiles.SanitizeProfileName(profileName);
+        RequireNoEnrollment();
+        if (!_codexEnabled) throw new InvalidOperationException("Activa Codex en Ajustes antes de cambiar de cuenta.");
         await _switchGate.WaitAsync(cancellationToken);
         var usageGateHeld = false;
         var initialRuntime = new CodexRuntimeState(false, null, []);
         var previousProfile = _profiles.LoadAppConfig().ActiveProfile;
-        var shouldRestart = skipStrictVerification;
+        var shouldRestart = false;
         var codexClosedByUs = false;
         AuthSnapshot? outgoingForRollback = null;
         ProfileAuthMatch? outgoingMatchForRollback = null;
         var targetWasInstalled = false;
+        LocalOrganizationTransfer.OrganizationChange? organizationChange = null;
 
         try
         {
@@ -423,8 +490,10 @@ internal sealed class AICountsManagerService : IDisposable
             // for it and prevent another query from starting during the switch.
             await _usageGate.WaitAsync(cancellationToken);
             usageGateHeld = true;
+            RequireNoEnrollment();
+            if (!_codexEnabled) throw new InvalidOperationException("Activa Codex en Ajustes antes de cambiar de cuenta.");
             initialRuntime = _processController.CaptureState();
-            shouldRestart = initialRuntime.IsRunning || skipStrictVerification;
+            shouldRestart = false;
 
             // Validate both sides before closing Codex. A corrupt target or an
             // unsaved live account must never interrupt the current session.
@@ -433,6 +502,7 @@ internal sealed class AICountsManagerService : IDisposable
             {
                 using var preflightLock = new GlobalAuthSwitchLock(_paths.CodexHome);
                 await preflightLock.AcquireAsync(TimeSpan.FromSeconds(10), cancellationToken);
+                await RecoverCodexOrganizationAsync(cancellationToken);
                 var preflightTarget = await _profiles.LoadProfileSnapshotAsync(profileName, cancellationToken);
                 if (!preflightTarget.Identity.IsUsable)
                 {
@@ -465,18 +535,8 @@ internal sealed class AICountsManagerService : IDisposable
             }
 
             if (initialRuntime.IsRunning)
-            {
-                var closed = await _processController.CloseNormallyAsync(TimeSpan.FromSeconds(45), cancellationToken);
-                if (!closed)
-                {
-                    return new SwitchProfileResult(
-                        SwitchProfileStatus.CodexStillRunning,
-                        "Codex sigue abierto. Termina o cancela la operacion activa, cierralo y vuelve a intentarlo.",
-                        previousProfile,
-                        profileName);
-                }
-                codexClosedByUs = true;
-            }
+                return new SwitchProfileResult(SwitchProfileStatus.CodexStillRunning,
+                    "Cierra Codex antes de cambiar su cuenta. Claude puede permanecer abierto.", previousProfile, profileName);
 
             await Task.Delay(TimeSpan.FromMilliseconds(850), cancellationToken);
             AuthSnapshot targetIdentityForRestart;
@@ -539,6 +599,10 @@ internal sealed class AICountsManagerService : IDisposable
                 }
                 else
                 {
+                    if (outgoingForRollback is not null)
+                        organizationChange = _codexOrganization.Prepare(outgoingForRollback.Identity.Fingerprint, target.Identity.Fingerprint,
+                            new(outgoingForRollback.Identity.AccountId ?? "", outgoingForRollback.Identity.UserId ?? ""),
+                            new(target.Identity.AccountId ?? "", target.Identity.UserId ?? ""));
                     var transaction = new CredentialTransaction(
                         Id: Guid.NewGuid().ToString("N"),
                         Operation: skipStrictVerification ? "reauthenticate" : "switch",
@@ -551,6 +615,7 @@ internal sealed class AICountsManagerService : IDisposable
                         StartedAt: UtcNow(),
                         UpdatedAt: UtcNow());
                     _profiles.WriteJournal(transaction);
+                    organizationChange?.Apply();
 
                     targetWasInstalled = true;
                     AtomicFile.WriteBytes(_paths.ActiveAuthPath, target.Bytes);
@@ -572,6 +637,7 @@ internal sealed class AICountsManagerService : IDisposable
                                 outgoingMatchForRollback,
                                 CancellationToken.None);
                             targetWasInstalled = false;
+                            organizationChange?.Rollback();
                             _profiles.ClearJournal();
                             if (shouldRestart)
                             {
@@ -602,6 +668,7 @@ internal sealed class AICountsManagerService : IDisposable
                                 outgoingMatchForRollback,
                                 CancellationToken.None);
                             targetWasInstalled = false;
+                            organizationChange?.Rollback();
                             _profiles.ClearJournal();
                             throw new InvalidOperationException("La verificacion devolvio una identidad distinta; se restauro la cuenta anterior.");
                         }
@@ -616,11 +683,13 @@ internal sealed class AICountsManagerService : IDisposable
                         _profiles.WriteJournal(transaction);
                     }
 
+                    organizationChange?.Verify();
                     _profiles.SaveAppConfig(_profiles.LoadAppConfig() with
                     {
                         ActiveProfile = profileName,
                         LastUpdatedAt = UtcNow(),
                     });
+                    organizationChange?.Commit();
                     _profiles.ClearJournal();
                     targetWasInstalled = false;
                     targetIdentityForRestart = target;
@@ -637,6 +706,7 @@ internal sealed class AICountsManagerService : IDisposable
                     targetWasInstalled = false;
                     _profiles.ClearJournal();
                 }
+                organizationChange?.Rollback();
                 throw;
             }
             finally
@@ -813,7 +883,7 @@ internal sealed class AICountsManagerService : IDisposable
 
     private async Task ReconcileActiveAuthAsync(CancellationToken cancellationToken)
     {
-        if (_disposed)
+        if (_disposed || !_codexEnabled)
         {
             return;
         }
@@ -823,6 +893,7 @@ internal sealed class AICountsManagerService : IDisposable
         {
             using var globalLock = new GlobalAuthSwitchLock(_paths.CodexHome);
             await globalLock.AcquireAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            if (!_codexEnabled) return;
             if (!File.Exists(_paths.ActiveAuthPath))
             {
                 _profiles.SaveAppConfig(_profiles.LoadAppConfig() with { ActiveProfile = null, LastUpdatedAt = UtcNow() });
@@ -830,6 +901,7 @@ internal sealed class AICountsManagerService : IDisposable
                 return;
             }
             var live = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken);
+            if (await CompleteEnrollmentAsync(live, cancellationToken)) { NotifyStateChanged(); return; }
             var match = await _profiles.FindByIdentityAsync(live, cancellationToken);
             var config = _profiles.LoadAppConfig();
 
@@ -971,7 +1043,7 @@ internal sealed class AICountsManagerService : IDisposable
             Error: usage.Error,
             Email: profile?.Email,
             SessionWindow: usage.Session, WeeklyWindow: usage.Weekly,
-            PlanType: usage.PlanType, SessionLimitNotApplicable: usage.SessionLimitNotApplicable);
+            PlanType: usage.PlanType, SessionLimitNotApplicable: usage.SessionLimitNotApplicable, CheckedAt: usage.CheckedAt);
     }
 
     private static string BuildStatus(UsageRecord usage)
@@ -1020,6 +1092,7 @@ internal sealed class AICountsManagerService : IDisposable
         }
         _disposed = true;
         _authWatcher?.Dispose();
+        _claudeAccounts?.Dispose();
         // In-flight callbacks may still release these gates after watcher cancellation.
         // No WaitHandle is allocated; let the gates be collected with the service.
     }
