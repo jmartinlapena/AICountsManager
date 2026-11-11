@@ -65,7 +65,7 @@ internal sealed class WindowsAntigravityCredentials : IAntigravityCredentials
 internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentials, HttpClient http, IQuotaProvider? localFallback = null, Func<bool>? hasRichLocalClient = null) : IQuotaProvider
 {
     public string Id => ProviderIds.Antigravity;
-    public bool CanSwitchAccounts => false;
+    public bool AcceptsSavedCredentials => false;
     private string? _fingerprint, _access, _plan;
     private DateTimeOffset _expiry;
     private readonly SemaphoreSlim _gate = new(1);

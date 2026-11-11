@@ -87,7 +87,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _service.StateChanged += OnServiceStateChanged;
         ApplyState();
-        _ = RefreshAsync();
+        _ = StartAsync();
     }
 
     protected override void ExitThreadCore()
@@ -133,6 +133,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         if (_widget.Visible) _widget.Hide();
         else { _widget.ShowNearTray(); _widget.Activate(); }
+    }
+
+    private async Task StartAsync()
+    {
+        try
+        {
+            await _service.InitializeAsync(_lifetime.Token);
+            await RefreshAsync();
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception ex) { if (!_exiting) ReportRefreshFailure("tray.startup", ex); }
     }
 
     private async Task RefreshAsync()

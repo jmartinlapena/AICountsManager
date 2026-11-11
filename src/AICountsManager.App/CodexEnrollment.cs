@@ -41,7 +41,7 @@ internal sealed partial class AICountsManagerService
             throw new InvalidOperationException("Completa o cancela primero el alta pendiente de Codex.");
     }
 
-    public async Task<string> BeginCodexAccountAsync(string name, CancellationToken token = default)
+    private async Task<string> BeginCodexAccountCoreAsync(string name, CancellationToken token = default)
     {
         name = _profiles.SanitizeProfileName(name);
         string message = "";
@@ -77,7 +77,7 @@ internal sealed partial class AICountsManagerService
                         _profiles.AddOrUpdateFromSnapshot(source, outgoing);
                     }
                     else await _profiles.SaveIfNewerAsync(source, outgoing, token);
-                    await EnsureOutgoingWasPreservedAsync(source, outgoing, token);
+                    await _codexSwitcher.EnsureOutgoingWasPreservedAsync(source, outgoing, token);
                 }
                 // File mode prevents a keychain fallback from silently restoring the old login.
                 EnsureFileModeConfig();
@@ -98,7 +98,7 @@ internal sealed partial class AICountsManagerService
                     _profiles.SaveAppConfig(_profiles.LoadAppConfig() with { ActiveProfile = source, LastUpdatedAt = UtcNow() });
                 }
                 if (!cleared || outgoing is null || File.Exists(_paths.ActiveAuthPath)) ClearEnrollment();
-                await RestartAfterFailedSwitchAsync(runtime, closed);
+                await _codexSwitcher.RestartAfterFailedSwitchAsync(runtime, closed);
                 throw;
             }
             message = "Alta preparada. Abre Codex e inicia sesión; se guardará automáticamente como «" + name + "».";
@@ -106,7 +106,7 @@ internal sealed partial class AICountsManagerService
         return message;
     }
 
-    public Task CancelCodexAccountAsync(CancellationToken token = default) => MutateProfilesAsync(async () =>
+    private Task CancelCodexAccountCoreAsync(CancellationToken token = default) => MutateProfilesAsync(async () =>
     {
         var pending = _pendingCodex;
         if (pending is null) return;
@@ -139,7 +139,7 @@ internal sealed partial class AICountsManagerService
             _profiles.SaveAppConfig(_profiles.LoadAppConfig() with { ActiveProfile = pending.PreviousProfile, LastUpdatedAt = UtcNow() });
             ClearEnrollment();
         }
-        finally { await RestartAfterFailedSwitchAsync(runtime, closed); }
+        finally { await _codexSwitcher.RestartAfterFailedSwitchAsync(runtime, closed); }
     }, token);
 
     // Runs only on auth-file events, at startup, or during an explicit refresh. No polling timer.

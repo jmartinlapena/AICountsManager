@@ -50,7 +50,7 @@ internal sealed class LocalOrganizationTransfer(ILocalOrganizationAdapter adapte
     {
         if (!HasRecovery) return;
         requireClosed();
-        var journal = ClaudeSessionArchive.LoadProtected<OrganizationJournal>(JournalPath); Validate(journal);
+        var journal = ProtectedJsonStore.Load<OrganizationJournal>(JournalPath); Validate(journal);
         if (currentIdentity == journal.TargetIdentity && journal.Stage == "applied")
         {
             // The target may have been used after a crash. Its newer edits remain authoritative.
@@ -89,7 +89,7 @@ internal sealed class LocalOrganizationTransfer(ILocalOrganizationAdapter adapte
             owner.RequireClosed();
             foreach (var file in journal.Files)
                 if (!OrganizationFiles.Equal(OrganizationFiles.Read(file.Path), file.Before)) throw new IOException("La organización cambió mientras se preparaba la cuenta.");
-            ClaudeSessionArchive.SaveProtected(owner.JournalPath, journal); _begun = true;
+            ProtectedJsonStore.Save(owner.JournalPath, journal); _begun = true;
             var index = 0;
             foreach (var file in journal.Files)
             {
@@ -97,7 +97,7 @@ internal sealed class LocalOrganizationTransfer(ILocalOrganizationAdapter adapte
                 owner.AfterWriteForTesting?.Invoke(++index);
             }
             Verify(); journal = journal with { Stage = "applied" };
-            ClaudeSessionArchive.SaveProtected(owner.JournalPath, journal);
+            ProtectedJsonStore.Save(owner.JournalPath, journal);
         }
         internal void Verify()
         {
@@ -117,7 +117,7 @@ internal sealed class LocalOrganizationTransfer(ILocalOrganizationAdapter adapte
 
 internal static class OrganizationFiles
 {
-    internal static byte[]? Read(string path) => ClaudeSessionArchive.ReadFile(path, 16 * 1024 * 1024);
+    internal static byte[]? Read(string path) => BoundedFile.Read(path, 16 * 1024 * 1024);
     internal static bool Equal(byte[]? a, byte[]? b) => a is null ? b is null : b is not null && a.AsSpan().SequenceEqual(b);
     internal static void RequirePath(string root, string path)
     {

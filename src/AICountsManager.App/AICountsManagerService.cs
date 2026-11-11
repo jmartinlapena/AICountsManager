@@ -1,6 +1,3 @@
-using System.Diagnostics;
-using System.Reflection;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -12,52 +9,40 @@ internal sealed partial class AICountsManagerService : IDisposable
     internal AppDiagnostics Diagnostics { get; }
     private readonly ProfileRepository _profiles;
     private readonly ICodexProcessController _processController;
-    private readonly LocalOrganizationTransfer _codexOrganization;
-    private readonly ICodexAppServerClient _appServer;
+    private readonly CodexAccountSwitcher _codexSwitcher;
+    private readonly ProviderComposition _composition;
+    private readonly AccountProviderRegistry _accountProviders;
+    private readonly WindowsIntegration _windows;
     private readonly CodexQuotaProvider _codexProvider;
-    private readonly CurrentProviderRegistry _otherProviders;
-    private readonly ClaudeAccounts? _claudeAccounts;
-    private IReadOnlyList<ProviderUsage> OtherAccounts => _otherProviders.Accounts.Concat(_claudeAccounts?.Accounts ?? []).ToArray();
-    internal bool CanManageClaude => _claudeAccounts is not null;
-    public string? PendingClaudeName => _claudeAccounts?.PendingName;
-    private bool ProviderEnabled(string id) => id == ProviderIds.Claude && _claudeAccounts is not null ? _claudeAccounts.Enabled : _otherProviders.IsEnabled(id);
+    private IReadOnlyList<ProviderUsage> OtherAccounts => _accountProviders.ReadingsExcept(ProviderIds.Codex);
+    internal bool CanManageClaude => _accountProviders.CanManage(ProviderIds.Claude);
+    public string? PendingClaudeName => _accountProviders.PendingName(ProviderIds.Claude);
+    private bool ProviderEnabled(string id) => _accountProviders.IsEnabled(id);
     private readonly Dictionary<string, IProviderTokenHistory> _providerHistories;
-    private readonly HttpClient _providerHttp = ProviderHttp.Create();
-    public bool AntigravityEnabled => _otherProviders.IsEnabled(ProviderIds.Antigravity);
+    public bool AntigravityEnabled => _accountProviders.IsEnabled(ProviderIds.Antigravity);
     private volatile bool _codexEnabled;
     public bool CodexEnabled => _codexEnabled;
-    public IReadOnlyList<CurrentProviderSetting> CurrentProviders =>
-        new[] { new CurrentProviderSetting(ProviderIds.Codex, "Codex", _codexEnabled) }.Concat(_otherProviders.Settings).Concat(_claudeAccounts is null ? [] : new[] { new CurrentProviderSetting(ProviderIds.Claude, "Claude", _claudeAccounts.Enabled) }).ToArray();
+    public IReadOnlyList<CurrentProviderSetting> CurrentProviders => _accountProviders.Settings;
     public Task SetAntigravityEnabledAsync(bool enabled) => SetCurrentProviderEnabledAsync(ProviderIds.Antigravity, enabled);
     public async Task SetCurrentProviderEnabledAsync(string id, bool enabled)
     {
-        if (id == ProviderIds.Codex)
-        {
-            await MutateProfilesAsync(() =>
-            {
-                if (!enabled) RequireNoEnrollment();
-                _profiles.SaveAppConfig(_profiles.LoadAppConfig() with { CodexEnabled = enabled, LastUpdatedAt = UtcNow() });
-                _codexEnabled = enabled;
-                _authWatcher?.SetEnabled(enabled);
-                return Task.CompletedTask;
-            }, CancellationToken.None);
-            if (enabled) { await ReconcileActiveAuthAsync(CancellationToken.None); await RefreshActiveProfileAsync(); }
-        }
-        else if (id == ProviderIds.Claude && _claudeAccounts is not null) await _claudeAccounts.SetEnabledAsync(enabled);
-        else await _otherProviders.SetEnabledAsync(id, enabled, CancellationToken.None);
+        await InitializeAsync();
+        await _accountProviders.SetEnabledAsync(id, enabled, CancellationToken.None);
         NotifyStateChanged();
     }
     public async Task RefreshCurrentProvidersAsync(CancellationToken token = default)
     {
+        await InitializeAsync(token);
         try { await RefreshActiveProfileAsync(token); }
-        finally { await _otherProviders.RefreshAsync(token); if (_claudeAccounts is not null) await _claudeAccounts.RefreshAsync(false, token); if (!_disposed) NotifyStateChanged(); }
+        finally { await _accountProviders.RefreshExceptAsync(ProviderIds.Codex, false, token); if (!_disposed) NotifyStateChanged(); }
     }
     private async Task<UsageRecord> ReadCodexUsageAsync(AuthSnapshot snapshot, CancellationToken token) =>
         CodexQuotaProvider.Legacy(await QuotaQuery.ReadAsync(_codexProvider, new CodexQuotaRequest(snapshot, _paths.CodexConfigPath), token));
-    private readonly SemaphoreSlim _credentialGate = new(1, 1);
-    private readonly SemaphoreSlim _switchGate = new(1, 1);
-    private readonly SemaphoreSlim _usageGate = new(1, 1);
-    private readonly AuthFileWatcher? _authWatcher;
+    private readonly AccountOperationCoordinator _operations = new();
+    private SemaphoreSlim _credentialGate => _operations.Credentials;
+    private SemaphoreSlim _switchGate => _operations.Mutations;
+    private SemaphoreSlim _usageGate => _operations.Quotas;
+    private AuthFileWatcher? _authWatcher;
     private bool _disposed;
     private readonly TokenHistory _history;
     private DateTimeOffset _nextBatchAllowed;
@@ -74,6 +59,7 @@ internal sealed partial class AICountsManagerService : IDisposable
     }
     public async Task<TokenHistorySnapshot> RefreshHistoryAsync(CancellationToken token = default)
     {
+        await InitializeAsync(token);
         if (_codexEnabled) await _history.RefreshAsync(token);
         foreach (var provider in _providerHistories)
             if (ProviderEnabled(provider.Key)) await provider.Value.RefreshAsync(token);
@@ -96,6 +82,8 @@ internal sealed partial class AICountsManagerService : IDisposable
         bool startWatcher, IQuotaProvider? currentProvider = null, string? geminiHome = null, IEnumerable<IQuotaProvider>? additionalProviders = null, ClaudeAccounts? claudeAccounts = null)
     {
         _paths = paths;
+        _startWatcher = startWatcher;
+        _windows = new WindowsIntegration(paths);
         Diagnostics = new AppDiagnostics(paths.LogsDir);
         _history = new TokenHistory(paths.CodexHome, Path.Combine(paths.AppHome, "cache", "token_history.json"));
         _paths.EnsureDirectories();
@@ -103,51 +91,16 @@ internal sealed partial class AICountsManagerService : IDisposable
         _codexEnabled = _profiles.LoadAppConfig().CodexEnabled;
         LoadEnrollment();
         _processController = processController ?? new CodexProcessController();
-        _codexOrganization = new LocalOrganizationTransfer(new CodexOrganizationAdapter(paths.CodexHome), paths.TransactionsDir, paths.BackupsDir,
-            () => { if (_processController.CaptureState().IsRunning) throw new InvalidOperationException("Cierra Codex para trasladar su organización local."); });
-        _appServer = appServer ?? new CodexAppServerClient(paths);
+        var codexAppServer = appServer ?? new CodexAppServerClient(paths);
         _codexProvider = new CodexQuotaProvider(usageClient ?? new UsageClient());
-        var current = currentProvider ?? (startWatcher ? AntigravityCloudProvider.Create() : null);
-        var claude = new ClaudeSessionSource(ClaudeSessionSource.Home, new ClaudeDesktopSessionSource(ClaudeDesktopSessionSource.DirectoryPath));
-        var cursor = new CursorSessionSource(CursorSessionSource.Database);
-        var extras = additionalProviders ?? (startWatcher ? new IQuotaProvider[] { new CursorQuotaProvider(cursor, _providerHttp) } : []);
-        _otherProviders = new CurrentProviderRegistry(paths, (current is null ? Array.Empty<IQuotaProvider>() : [current]).Concat(extras));
-        _claudeAccounts = claudeAccounts ?? (startWatcher && additionalProviders is null ? new ClaudeAccounts(paths.AppHome,
-            new ClaudeSessionArchive(ClaudeDesktopSessionSource.DirectoryPath, ClaudeSessionSource.Home, ClaudeSessionArchive.CodeConfigPath, Path.Combine(paths.TransactionsDir, "claude-rollback.bin"), _providerHttp),
-            _providerHttp, _profiles.SanitizeProfileName, NotifyStateChanged, Log) : null);
-        _providerHistories = new()
-        {
-            [ProviderIds.Antigravity] = new AntigravityTokenHistory(geminiHome ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini"), Path.Combine(paths.AppHome, "cache", "antigravity_history.json")),
-            [ProviderIds.Claude] = new ClaudeTokenHistory(ClaudeSessionSource.Home, Path.Combine(paths.AppHome, "cache", "claude_history.json")),
-            [ProviderIds.Cursor] = new CursorTokenHistory(cursor, _providerHttp, Path.Combine(paths.AppHome, "cache", "cursor_history.json"))
-        };
-
-        try
-        {
-            Task.Run(async () =>
-            {
-                await _profiles.RecoverJournalAsync();
-                if (_codexOrganization.HasRecovery && !_processController.CaptureState().IsRunning)
-                {
-                    using var recoveryLock = new GlobalAuthSwitchLock(_paths.CodexHome);
-                    await recoveryLock.AcquireAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
-                    await RecoverCodexOrganizationAsync(CancellationToken.None);
-                }
-                await ReconcileActiveAuthAsync(CancellationToken.None);
-            }).GetAwaiter().GetResult();
-        }
-        catch (Exception ex)
-        {
-            Log("La reconciliacion inicial no se pudo completar; no se modificaron credenciales.", ex);
-        }
-
-        if (startWatcher)
-        {
-            _authWatcher = new AuthFileWatcher(_paths.ActiveAuthPath, ReconcileActiveAuthAsync, Log);
-            _authWatcher.SetEnabled(_codexEnabled);
-            if (_codexEnabled) _authWatcher.ScheduleInitialReconciliation();
-        }
-        Log("AICountsManager iniciado con sincronizacion por eventos.", null);
+        _composition = new ProviderComposition(paths, startWatcher, currentProvider, geminiHome, additionalProviders,
+            claudeAccounts, _profiles.SanitizeProfileName, NotifyStateChanged, Log);
+        _providerHistories = _composition.Histories;
+        _codexSwitcher = new CodexAccountSwitcher(paths, _profiles, _processController, codexAppServer, _operations,
+            new(() => _codexEnabled, RequireNoEnrollment, ThrowIfDisposed, NotifyStateChanged,
+                token => RefreshActiveProfileAsync(token), Log));
+        _initialization = new ServiceInitialization(InitializeCoreAsync);
+        _accountProviders = new AccountProviderRegistry(new[] { CreateCodexAccountProvider() }.Concat(_composition.AccountProviders(_operations, NotifyStateChanged, InitializeAsync)));
     }
 
     public DashboardState BuildDashboardState()
@@ -200,7 +153,7 @@ internal sealed partial class AICountsManagerService : IDisposable
 
     public bool StrictVerificationEnabled() => _profiles.LoadAppConfig().StrictVerification;
 
-    public bool IsMutationInProgress => _switchGate.CurrentCount == 0;
+    public bool IsMutationInProgress => _operations.IsMutating || _initialization.IsRunning;
 
     public Task SetProfileOrderAsync(IReadOnlyList<string> names, CancellationToken cancellationToken = default) =>
         MutateProfilesAsync(() =>
@@ -243,6 +196,7 @@ internal sealed partial class AICountsManagerService : IDisposable
 
     public async Task<UsageRecord?> RefreshActiveProfileAsync(CancellationToken cancellationToken = default)
     {
+        await InitializeAsync(cancellationToken);
         if (!_codexEnabled) return null;
         if (!await _usageGate.WaitAsync(0, cancellationToken))
         {
@@ -308,8 +262,12 @@ internal sealed partial class AICountsManagerService : IDisposable
     }
 
     // Read-only queries with bounded concurrency. Never installs or renews an account's credentials.
-    public async Task<string> RefreshAllUsageAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    public Task<string> RefreshAllUsageAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default) =>
+        RefreshAllUsageCoreAsync(progress, cancellationToken, includeOtherProviders: true);
+
+    private async Task<string> RefreshAllUsageCoreAsync(IProgress<string>? progress, CancellationToken cancellationToken, bool includeOtherProviders)
     {
+        await InitializeAsync(cancellationToken);
         ThrowIfDisposed();
         if (_pendingCodex is not null) await ReconcileActiveAuthAsync(cancellationToken);
         if (!await _usageGate.WaitAsync(0, cancellationToken)) return "Ya hay una actualización en curso.";
@@ -353,9 +311,9 @@ internal sealed partial class AICountsManagerService : IDisposable
                     progress?.Report($"Actualizando cuentas · {completed}/{profiles.Count}");
                 }
             }
-            if (!deadline.IsCancellationRequested)
+            if (includeOtherProviders && !deadline.IsCancellationRequested)
             {
-                try { await _otherProviders.RefreshAsync(deadline.Token); if (_claudeAccounts is not null) await _claudeAccounts.RefreshAsync(true, deadline.Token); }
+                try { await _accountProviders.RefreshExceptAsync(ProviderIds.Codex, true, deadline.Token); }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
             }
             cancellationToken.ThrowIfCancellationRequested();
@@ -372,19 +330,6 @@ internal sealed partial class AICountsManagerService : IDisposable
         finally { _usageGate.Release(); }
     }
 
-    private async Task ClaudeMutationAsync(Func<ClaudeAccounts, Task> action)
-    {
-        if (_claudeAccounts is null) throw new InvalidOperationException("Claude no está disponible.");
-        await _switchGate.WaitAsync();
-        try { await action(_claudeAccounts); }
-        finally { _switchGate.Release(); NotifyStateChanged(); }
-    }
-    public Task BeginClaudeAccountAsync(string name) => ClaudeMutationAsync(c => c.BeginAsync(name));
-    public Task CancelClaudeAccountAsync() => ClaudeMutationAsync(c => c.CancelAsync());
-    public Task SwitchClaudeAccountAsync(string id) => ClaudeMutationAsync(c => c.SwitchAsync(id));
-    public Task RenameClaudeAccountAsync(string id, string name) => ClaudeMutationAsync(c => c.RenameAsync(id, name));
-    public Task DeleteClaudeAccountAsync(string id) => ClaudeMutationAsync(c => c.DeleteAsync(id));
-
     public Task AddCurrentProfileAsync(string profileName, CancellationToken cancellationToken = default) =>
         MutateProfilesAsync(async () =>
         {
@@ -398,7 +343,7 @@ internal sealed partial class AICountsManagerService : IDisposable
             Log($"Perfil '{profileName}' guardado para identidad {AuthHash.Short(snapshot.Identity.Fingerprint)}.", null);
         }, cancellationToken);
 
-    public Task RenameProfileAsync(string currentName, string newName, CancellationToken cancellationToken = default) =>
+    private Task RenameProfileCoreAsync(string currentName, string newName, CancellationToken cancellationToken = default) =>
         MutateProfilesAsync(() =>
         {
             RequireNoEnrollment();
@@ -406,7 +351,7 @@ internal sealed partial class AICountsManagerService : IDisposable
             return Task.CompletedTask;
         }, cancellationToken);
 
-    public Task DeleteProfileAsync(string profileName, CancellationToken cancellationToken = default) =>
+    private Task DeleteProfileCoreAsync(string profileName, CancellationToken cancellationToken = default) =>
         MutateProfilesAsync(async () =>
         {
             RequireNoEnrollment();
@@ -425,6 +370,7 @@ internal sealed partial class AICountsManagerService : IDisposable
 
     private async Task MutateProfilesAsync(Func<Task> mutation, CancellationToken cancellationToken)
     {
+        await InitializeAsync(cancellationToken);
         ThrowIfDisposed();
         await _switchGate.WaitAsync(cancellationToken);
         try
@@ -445,440 +391,6 @@ internal sealed partial class AICountsManagerService : IDisposable
         }
         finally { _switchGate.Release(); }
         NotifyStateChanged();
-    }
-
-    private async Task RecoverCodexOrganizationAsync(CancellationToken token)
-    {
-        if (!_codexOrganization.HasRecovery) return;
-        var active = File.Exists(_paths.ActiveAuthPath) ? await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: token) : null;
-        _codexOrganization.Recover(active?.Identity.Fingerprint);
-    }
-
-    public Task<SwitchProfileResult> SwitchToProfileAsync(
-        string profileName,
-        CancellationToken cancellationToken = default) =>
-        SwitchToProfileCoreAsync(profileName, skipStrictVerification: false, cancellationToken);
-
-    public Task<SwitchProfileResult> PrepareReauthenticationAsync(
-        string profileName,
-        CancellationToken cancellationToken = default) =>
-        SwitchToProfileCoreAsync(profileName, skipStrictVerification: true, cancellationToken);
-
-    private async Task<SwitchProfileResult> SwitchToProfileCoreAsync(
-        string profileName,
-        bool skipStrictVerification,
-        CancellationToken cancellationToken)
-    {
-        ThrowIfDisposed();
-        profileName = _profiles.SanitizeProfileName(profileName);
-        RequireNoEnrollment();
-        if (!_codexEnabled) throw new InvalidOperationException("Activa Codex en Ajustes antes de cambiar de cuenta.");
-        await _switchGate.WaitAsync(cancellationToken);
-        var usageGateHeld = false;
-        var initialRuntime = new CodexRuntimeState(false, null, []);
-        var previousProfile = _profiles.LoadAppConfig().ActiveProfile;
-        var shouldRestart = false;
-        var codexClosedByUs = false;
-        AuthSnapshot? outgoingForRollback = null;
-        ProfileAuthMatch? outgoingMatchForRollback = null;
-        var targetWasInstalled = false;
-        LocalOrganizationTransfer.OrganizationChange? organizationChange = null;
-
-        try
-        {
-            // A rate-limit query may own a short-lived app-server process. Wait
-            // for it and prevent another query from starting during the switch.
-            await _usageGate.WaitAsync(cancellationToken);
-            usageGateHeld = true;
-            RequireNoEnrollment();
-            if (!_codexEnabled) throw new InvalidOperationException("Activa Codex en Ajustes antes de cambiar de cuenta.");
-            initialRuntime = _processController.CaptureState();
-            shouldRestart = false;
-
-            // Validate both sides before closing Codex. A corrupt target or an
-            // unsaved live account must never interrupt the current session.
-            await _credentialGate.WaitAsync(cancellationToken);
-            try
-            {
-                using var preflightLock = new GlobalAuthSwitchLock(_paths.CodexHome);
-                await preflightLock.AcquireAsync(TimeSpan.FromSeconds(10), cancellationToken);
-                await RecoverCodexOrganizationAsync(cancellationToken);
-                var preflightTarget = await _profiles.LoadProfileSnapshotAsync(profileName, cancellationToken);
-                if (!preflightTarget.Identity.IsUsable)
-                {
-                    return new SwitchProfileResult(
-                        SwitchProfileStatus.Failed,
-                        $"El perfil '{profileName}' no contiene una identidad verificable.",
-                        previousProfile,
-                        profileName);
-                }
-
-                if (File.Exists(_paths.ActiveAuthPath))
-                {
-                    var preflightOutgoing = await StableAuthFile.ReadAsync(
-                        _paths.ActiveAuthPath,
-                        cancellationToken: cancellationToken);
-                    var preflightMatch = await _profiles.FindByIdentityAsync(preflightOutgoing, cancellationToken);
-                    if (preflightMatch is null)
-                    {
-                        return new SwitchProfileResult(
-                            SwitchProfileStatus.Failed,
-                            "La cuenta activa no esta guardada como perfil. Guardala antes de cambiar para no perder el inicio de sesion.",
-                            previousProfile,
-                            profileName);
-                    }
-                }
-            }
-            finally
-            {
-                _credentialGate.Release();
-            }
-
-            if (initialRuntime.IsRunning)
-                return new SwitchProfileResult(SwitchProfileStatus.CodexStillRunning,
-                    "Cierra Codex antes de cambiar su cuenta. Claude puede permanecer abierto.", previousProfile, profileName);
-
-            await Task.Delay(TimeSpan.FromMilliseconds(850), cancellationToken);
-            AuthSnapshot targetIdentityForRestart;
-
-            await _credentialGate.WaitAsync(cancellationToken);
-            try
-            {
-                using var globalLock = new GlobalAuthSwitchLock(_paths.CodexHome);
-                await globalLock.AcquireAsync(TimeSpan.FromSeconds(10), cancellationToken);
-
-                var target = await _profiles.LoadProfileSnapshotAsync(profileName, cancellationToken);
-                if (!target.Identity.IsUsable)
-                {
-                    throw new InvalidOperationException($"El perfil '{profileName}' no contiene una identidad verificable.");
-                }
-
-                if (File.Exists(_paths.ActiveAuthPath))
-                {
-                    outgoingForRollback = await StableAuthFile.ReadAsync(
-                        _paths.ActiveAuthPath,
-                        cancellationToken: cancellationToken);
-                    outgoingMatchForRollback = await _profiles.FindByIdentityAsync(
-                        outgoingForRollback,
-                        cancellationToken);
-                    if (outgoingMatchForRollback is null)
-                    {
-                        if (codexClosedByUs)
-                        {
-                            await _processController.RestartAsync(
-                                initialRuntime.DesktopExecutablePath,
-                                TimeSpan.FromSeconds(15),
-                                CancellationToken.None);
-                            codexClosedByUs = false;
-                        }
-                        return new SwitchProfileResult(
-                            SwitchProfileStatus.Failed,
-                            "La cuenta activa no esta guardada como perfil. Guardala antes de cambiar para no perder el inicio de sesion.",
-                            previousProfile,
-                            profileName);
-                    }
-                    await _profiles.SaveIfNewerAsync(
-                        outgoingMatchForRollback.Name,
-                        outgoingForRollback,
-                        cancellationToken);
-                    await EnsureOutgoingWasPreservedAsync(
-                        outgoingMatchForRollback.Name,
-                        outgoingForRollback,
-                        cancellationToken);
-                    previousProfile = outgoingMatchForRollback.Name;
-                }
-
-                if (outgoingForRollback is not null && outgoingForRollback.Identity.Matches(target.Identity))
-                {
-                    _profiles.SaveAppConfig(_profiles.LoadAppConfig() with
-                    {
-                        ActiveProfile = profileName,
-                        LastUpdatedAt = UtcNow(),
-                    });
-                    targetIdentityForRestart = outgoingForRollback;
-                }
-                else
-                {
-                    if (outgoingForRollback is not null)
-                        organizationChange = _codexOrganization.Prepare(outgoingForRollback.Identity.Fingerprint, target.Identity.Fingerprint,
-                            new(outgoingForRollback.Identity.AccountId ?? "", outgoingForRollback.Identity.UserId ?? ""),
-                            new(target.Identity.AccountId ?? "", target.Identity.UserId ?? ""));
-                    var transaction = new CredentialTransaction(
-                        Id: Guid.NewGuid().ToString("N"),
-                        Operation: skipStrictVerification ? "reauthenticate" : "switch",
-                        Stage: "prepared",
-                        SourceProfile: outgoingMatchForRollback?.Name,
-                        TargetProfile: profileName,
-                        SourceAuthFingerprint: outgoingForRollback?.ContentFingerprint,
-                        TargetAuthFingerprint: target.ContentFingerprint,
-                        TargetIdentityFingerprint: target.Identity.Fingerprint,
-                        StartedAt: UtcNow(),
-                        UpdatedAt: UtcNow());
-                    _profiles.WriteJournal(transaction);
-                    organizationChange?.Apply();
-
-                    targetWasInstalled = true;
-                    AtomicFile.WriteBytes(_paths.ActiveAuthPath, target.Bytes);
-                    var installed = await StableAuthFile.ReadAsync(
-                        _paths.ActiveAuthPath,
-                        cancellationToken: cancellationToken);
-                    EnsureInstalledTarget(profileName, target, installed);
-                    transaction = transaction with { Stage = "installed", UpdatedAt = UtcNow() };
-                    _profiles.WriteJournal(transaction);
-
-                    var strict = _profiles.LoadAppConfig().StrictVerification && !skipStrictVerification;
-                    if (strict)
-                    {
-                        var verification = await _appServer.VerifyAsync(forceRefresh: true, cancellationToken);
-                        if (verification.Status != AuthVerificationStatus.Success)
-                        {
-                            await RestoreOutgoingAsync(
-                                outgoingForRollback,
-                                outgoingMatchForRollback,
-                                CancellationToken.None);
-                            targetWasInstalled = false;
-                            organizationChange?.Rollback();
-                            _profiles.ClearJournal();
-                            if (shouldRestart)
-                            {
-                                await _processController.RestartAsync(
-                                    initialRuntime.DesktopExecutablePath,
-                                    TimeSpan.FromSeconds(15),
-                                    cancellationToken);
-                            }
-
-                            var status = verification.Status == AuthVerificationStatus.RefreshTokenInvalidated
-                                ? SwitchProfileStatus.RequiresReauthentication
-                                : SwitchProfileStatus.Failed;
-                            return new SwitchProfileResult(
-                                status,
-                                verification.Error ?? "La verificacion estricta no se pudo completar; se restauro la cuenta anterior.",
-                                previousProfile,
-                                profileName,
-                                shouldRestart);
-                        }
-
-                        var refreshed = await StableAuthFile.ReadAsync(
-                            _paths.ActiveAuthPath,
-                            cancellationToken: cancellationToken);
-                        if (!refreshed.Identity.Matches(target.Identity))
-                        {
-                            await RestoreOutgoingAsync(
-                                outgoingForRollback,
-                                outgoingMatchForRollback,
-                                CancellationToken.None);
-                            targetWasInstalled = false;
-                            organizationChange?.Rollback();
-                            _profiles.ClearJournal();
-                            throw new InvalidOperationException("La verificacion devolvio una identidad distinta; se restauro la cuenta anterior.");
-                        }
-                        await _profiles.SaveIfNewerAsync(profileName, refreshed, cancellationToken);
-                        target = refreshed;
-                        transaction = transaction with
-                        {
-                            Stage = "verified",
-                            TargetAuthFingerprint = refreshed.ContentFingerprint,
-                            UpdatedAt = UtcNow(),
-                        };
-                        _profiles.WriteJournal(transaction);
-                    }
-
-                    organizationChange?.Verify();
-                    _profiles.SaveAppConfig(_profiles.LoadAppConfig() with
-                    {
-                        ActiveProfile = profileName,
-                        LastUpdatedAt = UtcNow(),
-                    });
-                    organizationChange?.Commit();
-                    _profiles.ClearJournal();
-                    targetWasInstalled = false;
-                    targetIdentityForRestart = target;
-                }
-            }
-            catch
-            {
-                if (targetWasInstalled)
-                {
-                    await RestoreOutgoingAsync(
-                        outgoingForRollback,
-                        outgoingMatchForRollback,
-                        CancellationToken.None);
-                    targetWasInstalled = false;
-                    _profiles.ClearJournal();
-                }
-                organizationChange?.Rollback();
-                throw;
-            }
-            finally
-            {
-                _credentialGate.Release();
-            }
-
-            var restarted = false;
-            if (shouldRestart)
-            {
-                restarted = await _processController.RestartAsync(
-                    initialRuntime.DesktopExecutablePath,
-                    TimeSpan.FromSeconds(15),
-                    cancellationToken);
-                if (!restarted)
-                {
-                    return new SwitchProfileResult(
-                        SwitchProfileStatus.RestartFailed,
-                        "La cuenta se instaló, pero Codex no pudo reiniciarse automáticamente.",
-                        previousProfile,
-                        profileName);
-                }
-                codexClosedByUs = false;
-
-                await Task.Delay(TimeSpan.FromMilliseconds(900), cancellationToken);
-                var afterRestart = await StableAuthFile.ReadAsync(
-                    _paths.ActiveAuthPath,
-                    cancellationToken: cancellationToken);
-                if (!afterRestart.Identity.Matches(targetIdentityForRestart.Identity))
-                {
-                    return new SwitchProfileResult(
-                        SwitchProfileStatus.Failed,
-                        "Codex se reinicio, pero la identidad activa no coincide con el perfil solicitado.",
-                        previousProfile,
-                        profileName,
-                        true);
-                }
-            }
-
-            Log($"Cambio completado a '{profileName}' ({AuthHash.Short(targetIdentityForRestart.Identity.Fingerprint)}).", null);
-            NotifyStateChanged();
-            _usageGate.Release();
-            usageGateHeld = false;
-            _ = RefreshActiveProfileAsync(CancellationToken.None);
-            return new SwitchProfileResult(
-                SwitchProfileStatus.Success,
-                skipStrictVerification
-                    ? "Cuenta preparada. Completa el inicio de sesion en Codex; el watcher guardara las credenciales nuevas."
-                    : "Cuenta activada.",
-                previousProfile,
-                profileName,
-                restarted);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            await RestartAfterFailedSwitchAsync(initialRuntime, codexClosedByUs);
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Log($"Fallo cambiando al perfil '{profileName}'.", ex);
-            try
-            {
-                await _profiles.RecoverJournalAsync(cancellationToken);
-            }
-            catch
-            {
-            }
-            await RestartAfterFailedSwitchAsync(initialRuntime, codexClosedByUs);
-            return new SwitchProfileResult(
-                SwitchProfileStatus.Failed,
-                ex.Message,
-                previousProfile,
-                profileName);
-        }
-        finally
-        {
-            if (usageGateHeld)
-            {
-                _usageGate.Release();
-            }
-            _switchGate.Release();
-        }
-    }
-
-    private async Task RestartAfterFailedSwitchAsync(CodexRuntimeState initialRuntime, bool codexClosedByUs)
-    {
-        if (!codexClosedByUs || !initialRuntime.IsRunning || _processController.CaptureState().IsRunning)
-        {
-            return;
-        }
-
-        try
-        {
-            await _processController.RestartAsync(
-                initialRuntime.DesktopExecutablePath,
-                TimeSpan.FromSeconds(15),
-                CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            Log("No se pudo reiniciar Codex despues de cancelar o revertir el cambio.", ex);
-        }
-    }
-
-    private async Task RestoreOutgoingAsync(
-        AuthSnapshot? outgoing,
-        ProfileAuthMatch? outgoingMatch,
-        CancellationToken cancellationToken)
-    {
-        if (outgoing is null)
-        {
-            // Absence is a valid pre-transaction state and must also be restored.
-            if (File.Exists(_paths.ActiveAuthPath)) File.Delete(_paths.ActiveAuthPath);
-            _profiles.SaveAppConfig(_profiles.LoadAppConfig() with { ActiveProfile = null, LastUpdatedAt = UtcNow() });
-            return;
-        }
-
-        var restore = outgoing;
-        if (outgoingMatch is not null)
-        {
-            var stored = await _profiles.LoadProfileSnapshotAsync(outgoingMatch.Name, cancellationToken);
-            if (stored.Identity.Matches(outgoing.Identity) && stored.CompareGenerationTo(outgoing) > 0)
-            {
-                restore = stored;
-            }
-        }
-
-        AtomicFile.WriteBytes(_paths.ActiveAuthPath, restore.Bytes);
-        var verified = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken);
-        if (!verified.Identity.Matches(restore.Identity))
-        {
-            throw new IOException("No se pudo verificar la restauracion de la cuenta anterior.");
-        }
-        if (outgoingMatch is not null)
-        {
-            _profiles.SaveAppConfig(_profiles.LoadAppConfig() with
-            {
-                ActiveProfile = outgoingMatch.Name,
-                LastUpdatedAt = UtcNow(),
-            });
-        }
-    }
-
-    private async Task EnsureOutgoingWasPreservedAsync(
-        string profileName,
-        AuthSnapshot outgoing,
-        CancellationToken cancellationToken)
-    {
-        var stored = await _profiles.LoadProfileSnapshotAsync(profileName, cancellationToken);
-        if (!stored.Identity.Matches(outgoing.Identity))
-        {
-            throw new InvalidOperationException(
-                $"No se pudo preservar la identidad saliente en el perfil '{profileName}'.");
-        }
-        if (string.Equals(stored.CredentialFingerprint, outgoing.CredentialFingerprint, StringComparison.Ordinal)
-            || stored.CompareGenerationTo(outgoing) > 0)
-        {
-            return;
-        }
-
-        throw new InvalidOperationException(
-            $"La generacion saliente de '{profileName}' no pudo guardarse con seguridad. No se ha cambiado de cuenta.");
-    }
-
-    private static void EnsureInstalledTarget(string profileName, AuthSnapshot expected, AuthSnapshot installed)
-    {
-        if (!expected.Identity.Matches(installed.Identity)
-            || !string.Equals(expected.ContentFingerprint, installed.ContentFingerprint, StringComparison.Ordinal))
-        {
-            throw new IOException($"La sustitucion atomica de '{profileName}' no supero la verificacion.");
-        }
     }
 
     private async Task ReconcileActiveAuthAsync(CancellationToken cancellationToken)
@@ -962,67 +474,9 @@ internal sealed partial class AICountsManagerService : IDisposable
         NotifyStateChanged();
     }
 
-    public bool StartupShortcutExists() => File.Exists(_paths.StartupShortcutPath);
-
-    public void SetStartupEnabled(bool enabled)
-    {
-        if (enabled)
-        {
-            CreateStartupShortcut();
-        }
-        else if (File.Exists(_paths.StartupShortcutPath))
-        {
-            File.Delete(_paths.StartupShortcutPath);
-        }
-        NotifyStateChanged();
-    }
-
-    public void OpenFolder(string path)
-    {
-        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
-    }
-
-    private void CreateStartupShortcut()
-    {
-        Directory.CreateDirectory(_paths.StartupFolder);
-        var executable = Environment.ProcessPath
-            ?? throw new InvalidOperationException("No se pudo resolver el ejecutable.");
-        var entryAssembly = Assembly.GetEntryAssembly()?.Location;
-        var hostedByDotnet = string.Equals(
-            Path.GetFileNameWithoutExtension(executable),
-            "dotnet",
-            StringComparison.OrdinalIgnoreCase)
-            && !string.IsNullOrWhiteSpace(entryAssembly);
-        var arguments = hostedByDotnet ? $"\"{entryAssembly}\"" : string.Empty;
-        var command = $"""
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut('{_paths.StartupShortcutPath.Replace("'", "''")}')
-            $shortcut.TargetPath = '{executable.Replace("'", "''")}'
-            $shortcut.Arguments = '{arguments.Replace("'", "''")}'
-            $shortcut.WorkingDirectory = '{AppContext.BaseDirectory.Replace("'", "''")}'
-            $shortcut.IconLocation = '{Path.Combine(AppContext.BaseDirectory, "assets", "icon.ico").Replace("'", "''")},0'
-            $shortcut.Description = 'AICountsManager'
-            $shortcut.WindowStyle = 7
-            $shortcut.Save()
-            """;
-        using var process = Process.Start(new ProcessStartInfo
-        {
-            FileName = "powershell.exe",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            ArgumentList =
-            {
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                command,
-            },
-        });
-        if (process is null) throw new IOException("No se pudo actualizar el inicio con Windows.");
-        process.WaitForExit();
-        if (process.ExitCode != 0) throw new IOException("Windows no pudo guardar el acceso directo de inicio.");
-    }
+    public bool StartupShortcutExists() => _windows.StartupShortcutExists();
+    public void SetStartupEnabled(bool enabled) { _windows.SetStartupEnabled(enabled); NotifyStateChanged(); }
+    public void OpenFolder(string path) => _windows.OpenFolder(path);
 
     private static UsageRecord GetUsage(UsageCacheFile cache, string profileName) =>
         cache.Accounts.TryGetValue(profileName, out var usage) ? usage : UsageRecord.Empty();
@@ -1091,8 +545,9 @@ internal sealed partial class AICountsManagerService : IDisposable
             return;
         }
         _disposed = true;
-        _authWatcher?.Dispose();
-        _claudeAccounts?.Dispose();
+        _initialization.Dispose();
+        lock (_watcherSync) _authWatcher?.Dispose();
+        _composition.Dispose();
         // In-flight callbacks may still release these gates after watcher cancellation.
         // No WaitHandle is allocated; let the gates be collected with the service.
     }

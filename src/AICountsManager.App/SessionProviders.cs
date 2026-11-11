@@ -144,7 +144,7 @@ internal static class ProviderHttp
 internal sealed class ClaudeQuotaProvider(IClientSessionSource sessions, HttpClient http) : IQuotaProvider
 {
     public string Id => ProviderIds.Claude;
-    public bool CanSwitchAccounts => false;
+    public bool AcceptsSavedCredentials => false;
     public bool DefaultEnabled => false;
     public async Task<ProviderUsage> ReadAsync(QuotaRequest request, CancellationToken token)
     {
@@ -208,7 +208,7 @@ internal sealed class ClaudeQuotaProvider(IClientSessionSource sessions, HttpCli
 internal sealed class CursorQuotaProvider(IClientSessionSource sessions, HttpClient http) : IQuotaProvider
 {
     public string Id => ProviderIds.Cursor;
-    public bool CanSwitchAccounts => false;
+    public bool AcceptsSavedCredentials => false;
     public bool DefaultEnabled => false;
     public async Task<ProviderUsage> ReadAsync(QuotaRequest request, CancellationToken token)
     {

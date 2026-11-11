@@ -261,13 +261,14 @@ internal static partial class Program
         var path = Path.Combine(paths.CodexHome, ".codex-global-state.json"); PutJson(path, CodexOrganization(ca,cb)); var before = File.ReadAllBytes(path);
         var transfer = Transfer(paths, new CodexOrganizationAdapter(paths.CodexHome));
         transfer.Prepare(a.Identity.Fingerprint, b.Identity.Fingerprint, ca, cb).Apply();
-        using (var service = CreateService(paths)) { }
+        using (var service = CreateService(paths)) { await service.InitializeAsync(); }
         Check(File.ReadAllBytes(path).SequenceEqual(before) && !transfer.HasRecovery, "Service startup did not restore an interrupted source-side organization change.");
         transfer.Prepare(a.Identity.Fingerprint, b.Identity.Fingerprint, ca, cb).Apply();
         AtomicFile.WriteBytes(paths.ActiveAuthPath, b.Bytes);
         var latest = ReadObject(path); latest["unrelated-setting"] = "newer target edit"; PutJson(path, latest);
         using (var service = CreateService(paths))
         {
+            await service.InitializeAsync();
             Check((await Read(paths.ActiveAuthPath)).Identity.Matches(b.Identity), "Recovery rolled back installed target credentials.");
         }
         Check(!transfer.HasRecovery && ReadObject(path)["unrelated-setting"]!.GetValue<string>() == "newer target edit", "Service startup lost a completed target change.");

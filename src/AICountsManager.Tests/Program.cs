@@ -17,7 +17,7 @@ internal static partial class Program
         ("Claude history is incremental and deduplicates partial messages", ClaudeIncrementalHistoryAsync),
         ("Cursor history obeys cooldown and isolates accounts and providers", CursorHistoryIsolationAsync),
         ("all provider display values and marker positions match Codex", ProviderDisplayParityAsync),
-        ("only Codex accepts saved accounts and account switching capability", CurrentProviderBoundaryAsync),
+        ("saved credential requests remain separate from account management", CurrentProviderBoundaryAsync),
         ("registered providers appear automatically in settings, add menu and account order", RegisteredProvidersUiAsync),
         ("Gemini first-day reference and integer labels match Codex", GeminiFirstDayAsync),
         ("weekly-only pace and forecast agree across providers", WeeklyOnlyPaceAsync),
@@ -106,6 +106,14 @@ internal static partial class Program
         ("organization Codex startup reconciles interrupted changes", CodexOrganizationRecoveryAsync),
         ("organization client races defer recovery until closed", OrganizationClientRaceAsync),
         ("organization refuses ambiguous indices, outside paths and concurrent edits", OrganizationBoundariesAsync),
+        ("architecture shared encrypted storage reads and writes the legacy archive format", ProtectedArchiveCompatibilityAsync),
+        ("architecture initialization is asynchronous, shared and independent of caller cancellation", InitializationIsSharedAsync),
+        ("architecture shutdown cancels pending initialization", InitializationShutdownAsync),
+        ("architecture tray appears before locked startup recovery completes", TrayStartsBeforeRecoveryAsync),
+        ("architecture common account contract preserves Codex and Claude commands", SharedAccountManagementAsync),
+        ("architecture future named-account providers register without special branches", ExtensibleAccountRegistryAsync),
+        ("architecture construction and initialization preserve existing account data", ConstructorPreservesSavedDataAsync),
+        ("architecture named test groups survive insertion and reordering", NamedTestGroupsStableAsync),
         ("Claude Desktop selection respects accounts, expiry and logout", ClaudeDesktopSelectionAsync),
         ("Claude Desktop Windows storage stays read-only and falls back from CLI", ClaudeDesktopStorageAsync),
         ("Claude Desktop verifies live account and organization", ClaudeDesktopIdentityAsync),
@@ -114,21 +122,22 @@ internal static partial class Program
     public static async Task<int> Main(string[] args)
     {
         if (args is ["--probe-organization-copies", var codexCopyHome, var claudeCopyHome, var orgReport]) { await ProbeOrganizationCopiesAsync(codexCopyHome, claudeCopyHome, orgReport); return 0; }
-        if (args is ["--organization-tests"]) { foreach (var t in Tests.Where(t => t.Name.StartsWith("organization "))) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--architecture-tests"]) { foreach (var t in SelectTestGroup("architecture")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--organization-tests"]) { foreach (var t in SelectTestGroup("organization")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
         if (args is ["--render-reset-badges", var imagePath]) { await RenderQuotaResetAsync(imagePath); return 0; }
-        if (args is ["--reset-tests"]) { foreach (var t in Tests.Where(t => t.Name.StartsWith("Antigravity host") || t.Name.StartsWith("quota reset"))) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--reset-tests"]) { foreach (var t in SelectTestGroup("reset")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
         if (args is ["--probe-claude-archive", var archiveSource]) { await ProbeRealClaudeArchiveAsync(archiveSource); return 0; }
         if (args is ["--measure-claude-idle", var idleOutput]) { await MeasureManagedClaudeIdleAsync(idleOutput); return 0; }
-        if (args is ["--claude-account-tests"]) { foreach (var t in Tests.Skip(80).Take(5)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
-        if (args is ["--account-flow-tests"]) { foreach (var t in Tests.Skip(74).Take(6)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--claude-account-tests"]) { foreach (var t in SelectTestGroup("claude-accounts")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--account-flow-tests"]) { foreach (var t in SelectTestGroup("account-flow")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
         if (args is ["--probe-claude-desktop", var desktop]) { await ProbeClaudeDesktopAsync(desktop); return 0; }
-        if (args is ["--claude-desktop-tests"]) { foreach (var t in Tests.TakeLast(3)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--claude-desktop-tests"]) { foreach (var t in SelectTestGroup("claude-desktop")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
         if (args is ["--render-gemini-first-day", var geminiImage]) { await RenderGeminiFirstDayAsync(geminiImage); return 0; }
         if (args is ["--probe-refresh-storage-failure"]) { await RefreshStorageFailureAsync(); return 0; }
         if (args is ["--probe-tray-providers"]) { await ProbeTrayRefreshAsync(antigravity: true); return 0; }
         if (args is ["--measure-providers", var measurement]) { await MeasureUiResourcesAsync(measurement, true); return 0; }
-        if (args is ["--client-tests"]) { foreach (var t in Tests.Take(7)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
-        if (args is ["--provider-tests"]) { foreach (var t in Tests.Take(25)) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--client-tests"]) { foreach (var t in SelectTestGroup("client")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--provider-tests"]) { foreach (var t in SelectTestGroup("provider")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
         if (args is ["--render-providers", var folder]) { await RenderProviderUiAsync(folder); return 0; }
         if (args is ["--audit-antigravity-history", var historyCache])
         {
@@ -278,6 +287,7 @@ internal static partial class Program
             SeedProfiles(paths, older, ("AccountA", older));
 
             using var service = CreateService(paths, startWatcher: true);
+            await service.InitializeAsync();
             AtomicFile.WriteBytes(paths.ActiveAuthPath, newer.Bytes);
 
             var storedPath = Repository(paths).GetProfileAuthPath("AccountA");

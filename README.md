@@ -1,6 +1,6 @@
 # AICountsManager
 
-[Repositorio](https://github.com/jmartinlapena/AICountsManager) · [Organización local al cambiar de cuenta](docs/LOCAL-ORGANIZATION.md)
+[Repositorio](https://github.com/jmartinlapena/AICountsManager) · [Organización local al cambiar de cuenta](docs/LOCAL-ORGANIZATION.md) · [Arquitectura](docs/ARCHITECTURE.md)
 
 Gestor ligero de cuentas y consumo de herramientas de IA para la bandeja de Windows: Codex, Antigravity, Claude y Cursor.
 
@@ -8,7 +8,7 @@ La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF
 
 ## Instalar sin compilar
 
-Usa `AICountsManager-3.2.0-win-x64-Setup.exe` en equipos Intel/AMD, o `win-arm64` en Windows ARM. Se instala para tu usuario, crea el acceso directo y permite desinstalar desde Configuración de Windows. No necesita administrador, SDK, Python ni instalar .NET: el runtime .NET 10 LTS viene incluido.
+Usa `AICountsManager-3.2.1-win-x64-Setup.exe` en equipos Intel/AMD, o `win-arm64` en Windows ARM. Se instala para tu usuario, crea el acceso directo y permite desinstalar desde Configuración de Windows. No necesita administrador, SDK, Python ni instalar .NET: el runtime .NET 10 LTS viene incluido.
 
 También se genera un `Portable.zip`: descomprime **todo** el ZIP y ejecuta `AICountsManager.exe`. No copies solo el EXE. Requiere Windows 10 2004 (19041) o posterior / Windows 11; no funciona en macOS o Linux.
 
@@ -23,6 +23,10 @@ Claude y Cursor están desactivados por defecto. Se activan individualmente en A
 Sin servicios, procesos auxiliares permanentes, bibliotecas de gráficos, telemetría ni nuevos temporizadores. Las cuotas reutilizan el ciclo de cinco minutos. Los históricos solo se leen al abrir/actualizar el panel; desactivar un proveedor evita sus lecturas y peticiones. WPF continúa creándose al primer uso.
 
 Para Codex se requiere su instalación y autenticación en archivo (`cli_auth_credentials_store = "file"`). Claude necesita un inicio de sesión de Claude Code o Claude Desktop en Windows; Cursor, el de su aplicación. Las sesiones externas caducadas se renuevan desde sus clientes. AICountsManager solo sustituye la sesión de Claude durante una acción explícita de alta, activación o cancelación.
+
+## Mantenimiento interno (3.2.1)
+
+La gestión de cuentas utiliza un contrato común y capacidades explícitas, con autenticación específica de cada proveedor. El arranque es asíncrono, el almacenamiento cifrado es compartido y los grupos de pruebas se seleccionan por identidad. La interfaz, las rutas y los formatos de datos se conservan; no hay migración ni nuevos temporizadores. [Diseño de los componentes](docs/ARCHITECTURE.md) · [Validación](docs/VALIDATION-3.2.1.md).
 
 ## Requisitos de desarrollo
 

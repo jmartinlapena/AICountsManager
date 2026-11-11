@@ -15,7 +15,7 @@ internal interface IAntigravityConnection
 internal sealed class AntigravityQuotaProvider(IAntigravityConnection connection) : IQuotaProvider
 {
     public string Id => ProviderIds.Antigravity;
-    public bool CanSwitchAccounts => false;
+    public bool AcceptsSavedCredentials => false;
     public async Task<ProviderUsage> ReadAsync(QuotaRequest request, CancellationToken token)
     {
         if (request is not CurrentQuotaRequest) throw new ArgumentException("Antigravity solo consulta la sesión actual.");

@@ -61,7 +61,7 @@ internal static partial class Program
         catch (InvalidOperationException) { rejected = true; }
         Check(rejected && usage.Calls == 0, "Codex request contract was bypassed.");
         rejected = false;
-        try { _ = new CurrentProviderRegistry(paths, [new FakeQuotaProvider { Id = "future-client", CanSwitchAccounts = true }]); }
+        try { _ = new CurrentProviderRegistry(paths, [new FakeQuotaProvider { Id = "future-client", AcceptsSavedCredentials = true }]); }
         catch (ArgumentException) { rejected = true; }
         Check(rejected, "External switching capability was accepted.");
     });

@@ -27,7 +27,7 @@ internal sealed record ProviderUsage(string Provider, string? Identity, string N
 internal interface IQuotaProvider
 {
     string Id { get; }
-    bool CanSwitchAccounts { get; }
+    bool AcceptsSavedCredentials { get; }
     bool DefaultEnabled => true;
     Task<ProviderUsage> ReadAsync(QuotaRequest request, CancellationToken token);
 }
@@ -36,7 +36,7 @@ internal static class QuotaQuery
     // Shared deadline and cancellation. Credentials and parsing remain inside each provider.
     public static async Task<ProviderUsage> ReadAsync(IQuotaProvider provider, QuotaRequest request, CancellationToken token)
     {
-        if (provider.Id == ProviderIds.Codex ? request is not CodexQuotaRequest : request is not CurrentQuotaRequest || provider.CanSwitchAccounts)
+        if (provider.Id == ProviderIds.Codex ? request is not CodexQuotaRequest : request is not CurrentQuotaRequest || provider.AcceptsSavedCredentials)
             throw new InvalidOperationException("Solicitud incompatible con el adaptador de cuotas.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(12));
@@ -46,7 +46,7 @@ internal static class QuotaQuery
 internal sealed class CodexQuotaProvider(IUsageClient client) : IQuotaProvider
 {
     public string Id => ProviderIds.Codex;
-    public bool CanSwitchAccounts => true;
+    public bool AcceptsSavedCredentials => true;
     public async Task<ProviderUsage> ReadAsync(QuotaRequest request, CancellationToken token)
     {
         if (request is not CodexQuotaRequest codex) throw new ArgumentException("Solicitud de proveedor incorrecta.");
@@ -143,10 +143,11 @@ internal sealed class CurrentProviderRegistry
     {
         _diagnostics = new AppDiagnostics(paths.LogsDir);
         var adapters = providers.ToArray();
-        if (adapters.Any(p => p.Id == ProviderIds.Codex || p.CanSwitchAccounts))
+        if (adapters.Any(p => p.Id == ProviderIds.Codex || p.AcceptsSavedCredentials))
             throw new ArgumentException("Los proveedores externos solo pueden consultar la sesión actual.");
         _stores = adapters.ToDictionary(p => p.Id, p => new CurrentProviderStore(paths, p));
     }
+    internal IEnumerable<CurrentProviderStore> Stores => _stores.Values;
     public IReadOnlyList<CurrentProviderSetting> Settings => _stores.Values.Select(s => new CurrentProviderSetting(s.Id, ProviderIds.Name(s.Id), s.Enabled)).ToArray();
     public bool IsEnabled(string id) => _stores.TryGetValue(id, out var store) && store.Enabled;
     public IReadOnlyList<ProviderUsage> Accounts => _stores.Values.Where(s => s.Enabled)
@@ -162,7 +163,7 @@ internal sealed class CurrentProviderRegistry
         foreach (var batch in _stores.Values.Where(s => s.Enabled).Chunk(2))
             await Task.WhenAll(batch.Select(s => RefreshOneAsync(s, token))).ConfigureAwait(false);
     }
-    private async Task RefreshOneAsync(CurrentProviderStore store, CancellationToken token)
+    internal async Task RefreshOneAsync(CurrentProviderStore store, CancellationToken token)
     {
         try { await store.RefreshAsync(token).ConfigureAwait(false); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }

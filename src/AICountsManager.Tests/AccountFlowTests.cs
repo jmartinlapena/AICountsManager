@@ -52,7 +52,7 @@ internal static partial class Program
         SeedProfiles(paths, a, ("A", a));
         using (var service = CreateService(paths)) await service.BeginCodexAccountAsync("B");
         AtomicFile.WriteBytes(paths.ActiveAuthPath, b.Bytes);
-        using (var recovered = CreateService(paths)) Check(recovered.PendingCodexName is null && recovered.BuildDashboardState().Profiles.Count == 2, "Login completed while manager closed was not recovered.");
+        using (var recovered = CreateService(paths)) { await recovered.InitializeAsync(); Check(recovered.PendingCodexName is null && recovered.BuildDashboardState().Profiles.Count == 2, "Login completed while manager closed was not recovered."); }
         using (var service = CreateService(paths))
         {
             await service.BeginCodexAccountAsync("C");

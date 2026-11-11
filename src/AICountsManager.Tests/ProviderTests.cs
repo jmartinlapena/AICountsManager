@@ -60,7 +60,7 @@ internal static partial class Program
     private static async Task AntigravityIdentityAsync()
     {
         var connection = new FakeAntigravityConnection(); var provider = new AntigravityQuotaProvider(connection);
-        Check(!provider.CanSwitchAccounts, "External provider can switch accounts.");
+        Check(!provider.AcceptsSavedCredentials, "External provider can switch accounts.");
         Check((await provider.ReadAsync(new CurrentQuotaRequest(), default)).Quotas.Count == 5, "Current account not read.");
         connection.ChangingIdentity = true;
         Check((await provider.ReadAsync(new CurrentQuotaRequest(), default)).Status == "error", "Session change during query mixed identities.");
@@ -73,7 +73,7 @@ internal static partial class Program
     }
     private sealed class FakeQuotaProvider : IQuotaProvider
     {
-        public string Id { get; init; } = ProviderIds.Antigravity; public bool CanSwitchAccounts { get; init; }
+        public string Id { get; init; } = ProviderIds.Antigravity; public bool AcceptsSavedCredentials { get; init; }
         public ProviderUsage Result = SampleAntigravity(); public int Calls; public bool Fails;
         public Task<ProviderUsage> ReadAsync(QuotaRequest request, CancellationToken token)
         { Calls++; if (Fails) throw new IOException("Synthetic provider failure"); return Task.FromResult(Result); }
