@@ -81,8 +81,11 @@ internal sealed class HistoryPanel : C.Border
             if (bar.Children.Count == 0) bar.Children.Add(new C.Border { Height = 2, Background = UiTheme.Brush(_theme.Muted, 70) });
             var label = Text(9); label.Text = days[i].ToString("ddd"); label.HorizontalAlignment = W.HorizontalAlignment.Center; label.Foreground = UiTheme.Brush(highlighted ? _theme.Text : _theme.Muted); C.Grid.SetRow(label, 1); cell.Children.Add(bar); cell.Children.Add(label);
             var date = days[i];
-            var button = new C.Button { Content = cell, Margin = new W.Thickness(3, 0, 3, 0), Padding = new W.Thickness(0),
-                MinHeight = 0, Background = M.Brushes.Transparent, BorderThickness = new W.Thickness(0),
+            var isSelected = _selectedDay == date;
+            var button = new C.Button { Content = cell, Margin = new W.Thickness(2, 0, 2, 0), Padding = new W.Thickness(2, 2, 2, 1),
+                MinHeight = 0, Background = isSelected ? UiTheme.Brush(_theme.Accent, 24) : M.Brushes.Transparent,
+                BorderBrush = isSelected ? UiTheme.Brush(_theme.Accent, 150) : M.Brushes.Transparent,
+                BorderThickness = new W.Thickness(1),
                 HorizontalContentAlignment = W.HorizontalAlignment.Stretch, VerticalContentAlignment = W.VerticalAlignment.Stretch,
                 IsEnabled = date <= today && date >= today.AddDays(1 - TokenHistory.RetentionDays),
                 Cursor = System.Windows.Input.Cursors.Hand };

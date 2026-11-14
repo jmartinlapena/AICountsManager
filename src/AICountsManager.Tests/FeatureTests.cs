@@ -97,7 +97,24 @@ internal static partial class Program
         Check(!refresh.IsEnabled, "Refresh action did not lock duplicate UI clicks.");
         await EventuallyAsync(() => Task.FromResult(refresh.IsEnabled));
         Check(client.Calls == 3 && Repository(paths).LoadUsageCache().Accounts.Count == 3, "The visible refresh button did not update every account.");
-        form.ShowSettings(true); form.ShowSettings(false); form.Hide(); form.Visual.Show();
+        var shell = (System.Windows.Controls.Border)form.Visual.FindName("Shell");
+        var background = shell.Background;
+        var windowBackground = form.Visual.Background;
+        var height = form.Visual.Height;
+        var acrylic = form.AcrylicEnabled;
+        var location = (form.Visual.Left, form.Visual.Top);
+        form.ShowSettings(true);
+        Check(form.Visual.Height == height && (form.Visual.Left, form.Visual.Top) == location,
+            "Opening settings resized or moved the backdrop.");
+        Check(ReferenceEquals(shell.Background, background) && ReferenceEquals(form.Visual.Background, windowBackground)
+            && form.AcrylicEnabled == acrylic, "Opening settings changed the window material.");
+        form.Hide(); form.Visual.Show();
+        Check(((System.Windows.Controls.ScrollViewer)form.Visual.FindName("AccountsScroll")).Visibility == System.Windows.Visibility.Visible
+            && ((System.Windows.Controls.ScrollViewer)form.Visual.FindName("SettingsScroll")).Visibility == System.Windows.Visibility.Collapsed,
+            "Reopening the panel restored settings instead of the accounts.");
+        form.ShowSettings(true); form.Visual.Close(); form.Visual.Show();
+        Check(((System.Windows.Controls.ScrollViewer)form.Visual.FindName("AccountsScroll")).Visibility == System.Windows.Visibility.Visible,
+            "Closing from settings did not restore accounts on reopen.");
         Check(form.Rows.Count == 3 && !form.IsDisposed, "Settings/hide/reopen lost accounts.");
     }));
     private static string Record(string type, object payload, DateTimeOffset? time = null, int? ordinal = null) =>

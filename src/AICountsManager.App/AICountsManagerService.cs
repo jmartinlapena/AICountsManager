@@ -121,9 +121,10 @@ internal sealed partial class AICountsManagerService : IDisposable
             .ToList();
         var binary = _codexEnabled ? CodexBinaryLocator.Find() : null;
         var runtime = _codexEnabled ? _processController.CaptureState() : new CodexRuntimeState(false, null, []);
-        var settings = !_codexEnabled ? "Codex desactivado · perfiles conservados" : binary is null
-            ? "Codex no encontrado. Define CODEX_BINARY."
-            : $"Watcher activo · Verificacion estricta: {(config.StrictVerification ? "si" : "no")}";
+        var version = typeof(AICountsManagerService).Assembly.GetName().Version?.ToString(3) ?? "3.3.0";
+        var settings = !_codexEnabled ? $"v{version} · Codex desactivado · perfiles conservados" : binary is null
+            ? $"v{version} · Codex no encontrado. Define CODEX_BINARY."
+            : $"v{version} · Watcher activo · Verificación estricta: {(config.StrictVerification ? "sí" : "no")}";
 
         return new DashboardState(
             ActiveProfile: BuildProfileState(activeMeta, activeUsage, activeMeta is not null),
@@ -135,12 +136,22 @@ internal sealed partial class AICountsManagerService : IDisposable
             CodexRunning: runtime.IsRunning,
             UpdatedLabel: FormatRelative(usageCache.Accounts.Values.Select(u => u.CheckedAt).Concat(OtherAccounts.Select(a => a.CheckedAt))
                 .Where(value => DateTimeOffset.TryParse(value, out _)).OrderByDescending(value => DateTimeOffset.Parse(value!)).FirstOrDefault()),
-            OtherAccounts: OtherAccounts, AccountOrder: config.AccountOrder);
+            OtherAccounts: OtherAccounts, AccountOrder: config.AccountOrder, CodexBinaryMissing: _codexEnabled && binary is null);
     }
 
     public string BuildTrayTooltip(DashboardState state)
     {
-        if (!_codexEnabled) return "AICountsManager";
+        if (!_codexEnabled)
+        {
+            var other = state.OtherAccounts?.FirstOrDefault(a => a.Quotas.Any(q => q.CurrentUsed.HasValue));
+            if (other is not null)
+            {
+                var used = other.Quotas.First(q => q.CurrentUsed.HasValue).CurrentUsed!.Value;
+                var label = $"AICountsManager - {other.Name} - {Math.Clamp(100 - used, 0, 100):0}% restante";
+                return label.Length <= 63 ? label : label[..63];
+            }
+            return "AICountsManager";
+        }
         var active = state.ActiveProfile;
         var session = active.SessionRemainingPercent.HasValue
             ? $"{active.SessionRemainingPercent.Value:0}% restante"
@@ -576,7 +587,7 @@ internal sealed partial class AICountsManagerService : IDisposable
 
     private static string FormatReset(long? unixSeconds) => UsagePresentation.Countdown(unixSeconds, DateTimeOffset.UtcNow);
 
-    private static string FormatRelative(string? checkedAt)
+    internal static string FormatRelative(string? checkedAt)
     {
         if (!DateTimeOffset.TryParse(checkedAt, out var time))
         {

@@ -51,11 +51,15 @@ internal static class UsagePresentation
 }
 
 internal enum QuotaResetNotice { None, Expected, Unused }
+internal enum QuotaSeverity { Normal, Warning, Critical }
 
 // All account cards use the same display calculations. Provider adapters only supply data.
 internal sealed record QuotaDisplay(double? Remaining, string RemainingText, string? ResetText, double? Reference, QuotaPace? Pace,
     QuotaResetNotice ResetNotice = QuotaResetNotice.None)
 {
+    public QuotaSeverity Severity => Remaining is double r
+        ? r <= 10 ? QuotaSeverity.Critical : (r <= 20 || AtRisk) ? QuotaSeverity.Warning : QuotaSeverity.Normal
+        : QuotaSeverity.Normal;
     internal static QuotaResetNotice ResetState(UsageWindow? window, bool fresh, DateTimeOffset now, string? checkedAt)
     {
         if (window?.WindowDurationMins is not (300 or 10080) || window.ResetsAt is not long reset

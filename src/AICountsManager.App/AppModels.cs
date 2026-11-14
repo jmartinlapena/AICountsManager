@@ -153,7 +153,8 @@ internal sealed record DashboardState(
     string LogsFolder,
     bool StrictVerification,
     bool CodexRunning,
-    string? UpdatedLabel = null, IReadOnlyList<ProviderUsage>? OtherAccounts = null, IReadOnlyList<string>? AccountOrder = null)
+    string? UpdatedLabel = null, IReadOnlyList<ProviderUsage>? OtherAccounts = null, IReadOnlyList<string>? AccountOrder = null,
+    bool CodexBinaryMissing = false)
 {
     public IReadOnlyList<OrderedAccount> OrderedAccounts => AccountOrdering.Resolve(Profiles, OtherAccounts, AccountOrder);
 }

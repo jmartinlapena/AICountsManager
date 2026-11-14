@@ -65,6 +65,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _ = _dispatcher.Handle;
 
         _menu = new ContextMenuStrip();
+        var openItem = new ToolStripMenuItem("Abrir panel", null, (_, _) => OpenWidget())
+        {
+            Font = new Font(SystemFonts.MenuFont ?? Control.DefaultFont, FontStyle.Bold),
+        };
+        _menu.Items.Add(openItem);
+        _menu.Items.Add("Actualizar cuotas", null, async (_, _) => await RefreshAsync(all: true));
+        _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("Salir", null, (_, _) =>
         {
             if (_service.IsMutationInProgress)
@@ -125,14 +132,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     internal void ToggleWidget()
     {
+        if (_widget?.Visible == true) _widget.Hide();
+        else OpenWidget();
+    }
+
+    private void OpenWidget()
+    {
         if (_widget is null)
         {
             _widget = new WidgetForm(_service);
             _ = _widget.Handle;
             _widget.HideRequested += (_, _) => _widget.Hide();
         }
-        if (_widget.Visible) _widget.Hide();
-        else { _widget.ShowNearTray(); _widget.Activate(); }
+        if (!_widget.Visible) _widget.ShowNearTray();
+        _widget.Activate();
     }
 
     private async Task StartAsync()
@@ -146,11 +159,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex) { if (!_exiting) ReportRefreshFailure("tray.startup", ex); }
     }
 
-    private async Task RefreshAsync()
+    private async Task RefreshAsync(bool all = false)
     {
         try
         {
-            await _service.RefreshCurrentProvidersAsync(_lifetime.Token);
+            if (all && _widget?.Visible == true)
+                await _widget.RefreshAsync();
+            else if (all)
+                await _service.RefreshAllUsageAsync(cancellationToken: _lifetime.Token);
+            else
+                await _service.RefreshCurrentProvidersAsync(_lifetime.Token);
         }
         catch (Exception ex)
         {

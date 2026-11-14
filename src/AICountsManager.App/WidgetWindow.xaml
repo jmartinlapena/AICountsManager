@@ -86,7 +86,7 @@
       </ControlTemplate></Setter.Value></Setter>
     </Style>
   </Window.Resources>
-  <Border x:Name="Shell" Background="{DynamicResource ShellTint}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="16" Padding="14,12,14,10">
+  <Border x:Name="Shell" Background="{DynamicResource ShellTint}" Padding="14,12,14,10">
     <Grid>
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
@@ -108,9 +108,16 @@
       <Grid Grid.Row="1" Margin="1,0,1,10">
         <TextBlock x:Name="SectionLabel" Text="CUENTAS" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource Muted}"/>
         <TextBlock x:Name="CountLabel" HorizontalAlignment="Right" FontSize="10" Foreground="{DynamicResource Muted}"/>
+        <Border x:Name="BusyBar" Height="2" VerticalAlignment="Bottom" Margin="0,0,0,-6" CornerRadius="1" Background="{DynamicResource Accent}" Visibility="Collapsed"/>
       </Grid>
       <ScrollViewer x:Name="AccountsScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,5,0" CanContentScroll="False">
         <StackPanel x:Name="DashboardStack">
+        <Border x:Name="WarningBanner" Visibility="Collapsed" CornerRadius="10" Padding="10,8" Margin="0,0,0,8" BorderThickness="1">
+          <DockPanel>
+            <Button x:Name="WarningActionButton" Content="Configurar" DockPanel.Dock="Right" FontSize="10" Padding="8,3" MinHeight="24" Margin="8,0,0,0" BorderThickness="1" Visibility="Collapsed"/>
+            <TextBlock x:Name="WarningText" FontSize="10.5" TextWrapping="Wrap" VerticalAlignment="Center"/>
+          </DockPanel>
+        </Border>
         <StackPanel x:Name="AccountList"/>
         <StackPanel x:Name="EnrollmentPanel" Visibility="Collapsed" Margin="10,12">
           <TextBlock x:Name="EnrollmentLabel" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource Muted}"/>
@@ -120,31 +127,52 @@
           <TextBlock x:Name="ClaudeEnrollmentLabel" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource Muted}"/>
           <Button x:Name="CancelClaudeEnrollmentButton" Content="Cancelar alta de Claude" HorizontalAlignment="Left" Margin="0,8,0,0"/>
         </StackPanel>
-      <StackPanel x:Name="EmptyPanel" VerticalAlignment="Center" Visibility="Collapsed" Margin="16,22">
+      <StackPanel x:Name="EmptyPanel" VerticalAlignment="Center" Visibility="Collapsed" Margin="16,18">
         <TextBlock Text="Tu primera cuenta" FontSize="16" FontWeight="SemiBold" TextAlignment="Center"/>
-        <TextBlock Text="Pulsa + para añadir una cuenta y completar el inicio de sesión." Foreground="{DynamicResource Muted}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,8,0,0"/>
+        <TextBlock Text="Añade una cuenta o activa un proveedor para ver tus cuotas y actividad." Foreground="{DynamicResource Muted}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,6,0,12"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+          <Button x:Name="EmptyAddButton" Content="Añadir cuenta" BorderThickness="1" Margin="0,0,8,0"/>
+          <Button x:Name="EmptySettingsButton" Content="Proveedores" BorderThickness="1"/>
+        </StackPanel>
       </StackPanel>
         </StackPanel>
       </ScrollViewer>
-      <ScrollViewer x:Name="SettingsScroll" Grid.Row="2" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Margin="0,4,4,0">
-          <TextBlock Text="Proveedores" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,10"/>
-          <StackPanel x:Name="ProviderToggles"/>
-          <TextBlock Text="Consulta todas las cuentas guardadas. Codex y Claude permiten cambiar de cuenta cuando su aplicación está cerrada." Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,16"/>
-          <TextBlock Text="Orden de las cuentas" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,6"/>
-          <TextBlock Text="Usa las flechas. El orden se conserva al cambiar de cuenta." Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/>
-          <StackPanel x:Name="OrderList" Margin="0,0,0,14"/>
-          <Border Height="1" Background="{DynamicResource Line}" Margin="0,0,0,16"/>
-          <TextBlock Text="Sesiones" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,14"/>
-          <CheckBox x:Name="StrictToggle" Content="Verificar la sesión antes de abrir Codex"/>
-          <TextBlock Text="Comprueba la renovación al cambiar de cuenta. El cambio puede tardar unos segundos más." Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="40,-4,0,20"/>
-          <CheckBox x:Name="StartupToggle" Content="Iniciar AICountsManager con Windows"/>
-          <Border Height="1" Background="{DynamicResource Line}" Margin="0,8,0,18"/>
-          <TextBlock Text="Almacenamiento" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
-          <TextBlock Text="Tus perfiles se conservan en este equipo." Foreground="{DynamicResource Muted}" FontSize="11" Margin="0,0,0,12"/>
-          <Button x:Name="FolderButton" Content="Abrir carpeta de datos" HorizontalAlignment="Left" BorderThickness="1" Margin="0,0,0,8"/>
-          <Button x:Name="FileModeButton" Content="Guardar sesiones en archivo" HorizontalAlignment="Left" BorderThickness="1"/>
-          <TextBlock x:Name="SettingsSummary" FontSize="10" TextWrapping="Wrap" Foreground="{DynamicResource Muted}" Margin="0,16,0,0"/>
+      <ScrollViewer x:Name="SettingsScroll" Grid.Row="2" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,5,0">
+        <StackPanel Margin="0,2,0,4">
+          <Border CornerRadius="11" Padding="12,10" Margin="0,0,0,8" Background="{DynamicResource CardBg}">
+            <StackPanel>
+              <TextBlock Text="Proveedores" FontSize="13.5" FontWeight="SemiBold" Margin="0,0,0,10"/>
+              <StackPanel x:Name="ProviderToggles"/>
+              <TextBlock Text="Consulta todas las cuentas guardadas. Codex y Claude permiten cambiar de cuenta cuando su aplicación está cerrada." Foreground="{DynamicResource Muted}" FontSize="10.5" TextWrapping="Wrap" Margin="0,2,0,0"/>
+            </StackPanel>
+          </Border>
+          <Border CornerRadius="11" Padding="12,10" Margin="0,0,0,8" Background="{DynamicResource CardBg}">
+            <StackPanel>
+              <TextBlock Text="Orden de las cuentas" FontSize="13.5" FontWeight="SemiBold" Margin="0,0,0,4"/>
+              <TextBlock Text="Usa las flechas. El orden se conserva al cambiar de cuenta." Foreground="{DynamicResource Muted}" FontSize="10.5" TextWrapping="Wrap" Margin="0,0,0,10"/>
+              <StackPanel x:Name="OrderList"/>
+            </StackPanel>
+          </Border>
+          <Border CornerRadius="11" Padding="12,10" Margin="0,0,0,8" Background="{DynamicResource CardBg}">
+            <StackPanel>
+              <TextBlock Text="Sesiones" FontSize="13.5" FontWeight="SemiBold" Margin="0,0,0,12"/>
+              <CheckBox x:Name="StrictToggle" Content="Verificar la sesión antes de abrir Codex"/>
+              <TextBlock Text="Comprueba la renovación al cambiar de cuenta. El cambio puede tardar unos segundos más." Foreground="{DynamicResource Muted}" FontSize="10.5" TextWrapping="Wrap" Margin="40,-6,0,14"/>
+              <CheckBox x:Name="StartupToggle" Content="Iniciar AICountsManager con Windows" Margin="0"/>
+            </StackPanel>
+          </Border>
+          <Border CornerRadius="11" Padding="12,10" Margin="0,0,0,8" Background="{DynamicResource CardBg}">
+            <StackPanel>
+              <TextBlock Text="Almacenamiento" FontSize="13.5" FontWeight="SemiBold" Margin="0,0,0,6"/>
+              <TextBlock Text="Tus perfiles se conservan en este equipo." Foreground="{DynamicResource Muted}" FontSize="10.5" Margin="0,0,0,10"/>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <Button x:Name="FolderButton" Content="Carpeta de datos" BorderThickness="1" Margin="0,0,8,0"/>
+                <Button x:Name="LogsButton" Content="Carpeta de logs" BorderThickness="1"/>
+              </StackPanel>
+              <Button x:Name="FileModeButton" Content="Guardar sesiones en archivo" HorizontalAlignment="Left" BorderThickness="1"/>
+            </StackPanel>
+          </Border>
+          <TextBlock x:Name="SettingsSummary" FontSize="10" TextWrapping="Wrap" Foreground="{DynamicResource Muted}" Margin="2,4,2,0"/>
         </StackPanel>
       </ScrollViewer>
       <Grid Grid.Row="3" Margin="0,10,0,0">

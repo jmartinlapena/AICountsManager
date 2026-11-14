@@ -32,6 +32,7 @@ internal sealed class WidgetForm : IDisposable
     private CancellationTokenSource? _historyCancellation;
 
     private bool _busy, _applying, _settingsVisible, _dialogOpen;
+    private string? _transientNotice;
     private Interop.HwndSource? _source;
     public event EventHandler? HideRequested;
     public bool IsDisposed { get; private set; }
@@ -78,7 +79,17 @@ internal sealed class WidgetForm : IDisposable
         }
         _historyTimer = new Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _historyTimer.Tick += async (_, _) => { _historyTimer.Stop(); if (Visible) await UpdateHistoryAsync(); };
-        _window.IsVisibleChanged += (_, _) => { if (!Visible) { _historyTimer.Stop(); _historyCancellation?.Cancel(); _clock?.Stop(); } else if (_clockEnabled) _clock?.Start(); };
+        _window.IsVisibleChanged += (_, _) =>
+        {
+            if (!Visible)
+            {
+                _historyTimer.Stop();
+                _historyCancellation?.Cancel();
+                _clock?.Stop();
+                ShowSettings(false);
+            }
+            else if (_clockEnabled) _clock?.Start();
+        };
 
         _window.Closing += (_, e) => { if (!IsDisposed) { e.Cancel = true; _window.Hide(); } };
         System.Windows.Forms.Integration.ElementHost.EnableModelessKeyboardInterop(_window);
@@ -103,9 +114,16 @@ internal sealed class WidgetForm : IDisposable
         Click("CancelClaudeEnrollmentButton", async () => await RunAsync(async () => { await _service.CancelClaudeAccountAsync(); return "Alta terminada. Sesiones conservadas."; }));
         Click("CancelEnrollmentButton", async () => await RunAsync(async () => { await _service.CancelCodexAccountAsync(); return "Alta terminada. Sesiones conservadas."; }));
         Click("AddButton", () => { _addMenu.PlacementTarget = Find<C.Button>("AddButton"); _addMenu.IsOpen = true; });
+        Click("EmptyAddButton", () => { _addMenu.PlacementTarget = Find<C.Button>("EmptyAddButton"); _addMenu.IsOpen = true; });
+        Click("EmptySettingsButton", () => ShowSettings(true));
         Click("FolderButton", () =>
         {
             try { if (_state is not null) _service.OpenFolder(_state.DataFolder); }
+            catch (Exception ex) { ShowError(ex.Message); }
+        });
+        Click("LogsButton", () =>
+        {
+            try { if (_state is not null) _service.OpenFolder(_state.LogsFolder); }
             catch (Exception ex) { ShowError(ex.Message); }
         });
         Click("FileModeButton", async () =>
@@ -169,10 +187,24 @@ internal sealed class WidgetForm : IDisposable
         WindowMaterial.Position(Handle, screen.Right - 382, screen.Bottom - 510);
         var dpi = WindowMaterial.Dpi(Handle) / 96d;
         _window.Width = Math.Min(382, Math.Max(280, screen.Width / dpi - 24));
-        _window.Height = Math.Min(_settingsVisible ? 440 : Math.Max(440, Math.Min(710, 352 + _rows.Values.Sum(row => row.EstimatedHeight))), screen.Height / dpi - 24);
-        WindowMaterial.Position(Handle, screen.Right - (int)Math.Ceiling(_window.Width * dpi) - 12, screen.Bottom - (int)Math.Ceiling(_window.Height * dpi) - 12);
+        UpdateWindowHeight(screen, dpi);
         _window.Show(); _window.Activate();
         _ = UpdateHistoryAsync();
+    }
+    private void UpdateWindowHeight(System.Drawing.Rectangle? workingArea = null, double? dpiScale = null)
+    {
+        var screen = workingArea ?? Screen.FromHandle(Handle).WorkingArea;
+        var dpi = dpiScale ?? (WindowMaterial.Dpi(Handle) / 96d);
+        var cardsHeight = _rows.Values.Sum(row => row.EstimatedHeight) + _externalRows.Values.Sum(card => card.EstimatedHeight);
+        var bannerHeight = Find<C.Border>("WarningBanner").Visibility == W.Visibility.Visible ? 44 : 0;
+        var desired = Math.Max(440, Math.Min(740, 352 + cardsHeight + bannerHeight));
+        var height = Math.Min(desired, screen.Height / dpi - 24);
+        if (workingArea is null && _window.Height == height) return;
+
+        _window.Height = height;
+        var left = Math.Max(screen.Left, screen.Right - (int)Math.Ceiling(_window.Width * dpi) - 12);
+        var top = Math.Max(screen.Top, screen.Bottom - (int)Math.Ceiling(height * dpi) - 12);
+        WindowMaterial.Position(Handle, left, top);
     }
     public void ApplyState(DashboardState state)
     {
@@ -222,6 +254,8 @@ internal sealed class WidgetForm : IDisposable
             foreach (var provider in _service.CurrentProviders) _providerToggles[provider.Id].IsChecked = provider.Enabled;
             Find<C.CheckBox>("StrictToggle").IsChecked = state.StrictVerification;
             Find<C.CheckBox>("StartupToggle").IsChecked = _service.StartupShortcutExists();
+            UpdateWarningBanner(state.CodexBinaryMissing);
+            if (Visible) UpdateWindowHeight();
             UpdateFooter(state);
             if (_settingsVisible) UpdateOrderList();
             Find<C.TextBlock>("CountLabel").Text = $"{state.Profiles.Count + (state.OtherAccounts?.Count ?? 0)} cuentas";
@@ -230,25 +264,45 @@ internal sealed class WidgetForm : IDisposable
         }
         finally { _applying = false; }
     }
+    private void UpdateWarningBanner(bool codexBinaryMissing)
+    {
+        var banner = Find<C.Border>("WarningBanner");
+        if (codexBinaryMissing)
+        {
+            banner.Visibility = W.Visibility.Visible;
+            banner.Background = UiTheme.Brush(_theme.Warning, _theme.HighContrast ? (byte)0 : (byte)22);
+            banner.BorderBrush = UiTheme.Brush(_theme.Warning, 110);
+            var text = Find<C.TextBlock>("WarningText");
+            text.Text = "Codex no encontrado. Define CODEX_BINARY o desactiva Codex en Ajustes.";
+            text.Foreground = UiTheme.Brush(_theme.Warning);
+        }
+        else banner.Visibility = W.Visibility.Collapsed;
+    }
     internal void ShowSettings(bool show) { _settingsVisible = show; if (show) UpdateOrderList(); UpdateViews(); }
     private void UpdateFooter(DashboardState state)
     {
         var total = state.Profiles.Count + (state.OtherAccounts?.Count ?? 0);
         var fresh = state.Profiles.Count(p => p.Status == "ok") + (state.OtherAccounts?.Count(p => p.Fresh) ?? 0);
         Find<C.TextBlock>("FooterLabel").Text = total == 0 ? "Sin cuentas guardadas" : $"{fresh}/{total} cuentas al día";
-        Find<C.TextBlock>("FooterUpdated").Text = state.UpdatedLabel ?? "Sin lecturas recientes";
+        Find<C.TextBlock>("FooterUpdated").Text = _transientNotice ?? state.UpdatedLabel ?? "Sin lecturas recientes";
+        _transientNotice = null;
         var resets = state.Profiles.SelectMany(p => new[] { (p.Name, Window: p.SessionWindow), (p.Name, Window: p.WeeklyWindow) })
             .Concat((state.OtherAccounts ?? []).SelectMany(a => a.Quotas.Select(q => (a.Name, Window: (UsageWindow?)q.Window))))
             .Where(p => p.Window?.ResetsAt > DateTimeOffset.UtcNow.ToUnixTimeSeconds() && p.Window.ResetsAt < DateTimeOffset.MaxValue.ToUnixTimeSeconds())
             .OrderBy(p => p.Window!.ResetsAt).ToArray();
         var next = Find<C.TextBlock>("FooterReset");
-        next.Text = resets.Length > 0 ? UsagePresentation.Duration(resets[0].Window!.ResetsAt!.Value - DateTimeOffset.UtcNow.ToUnixTimeSeconds()) : "—";
+        next.Text = resets.Length > 0 ? UsagePresentation.Duration(resets[0].Window!.ResetsAt!.Value - DateTimeOffset.UtcNow.ToUnixTimeSeconds()) + " · " + resets[0].Name : "—";
     }
     private void UpdateOrderList()
     {
         var list = Find<C.StackPanel>("OrderList"); list.Children.Clear();
         if (_state is null) return;
         var accounts = _state.OrderedAccounts;
+        if (accounts.Count == 0)
+        {
+            list.Children.Add(new C.TextBlock { Text = "No hay cuentas visibles para ordenar.", FontSize = 10.5, Foreground = UiTheme.Brush(_theme.Muted) });
+            return;
+        }
         for (var index = 0; index < accounts.Count; index++)
         {
             var account = accounts[index];
@@ -259,7 +313,7 @@ internal sealed class WidgetForm : IDisposable
             for (var direction = -1; direction <= 1; direction += 2)
             {
                 var step = direction;
-                var button = new C.Button { Content = direction < 0 ? "↑" : "↓", Width = 28, MinHeight = 26, Padding = new W.Thickness(0), IsEnabled = !_busy && index + direction >= 0 && index + direction < accounts.Count };
+                var button = new C.Button { Content = direction < 0 ? "\uE70E" : "\uE70D", FontFamily = new M.FontFamily("Segoe Fluent Icons"), FontSize = 10, Width = 28, MinHeight = 26, Padding = new W.Thickness(0), IsEnabled = !_busy && index + direction >= 0 && index + direction < accounts.Count };
                 W.Automation.AutomationProperties.SetName(button, (direction < 0 ? "Subir " : "Bajar ") + name);
                 button.Click += async (_, _) => await MoveAccountAsync(account.Id, step);
                 C.Grid.SetColumn(button, direction < 0 ? 1 : 2); row.Children.Add(button);
@@ -291,7 +345,8 @@ internal sealed class WidgetForm : IDisposable
     private void SetBusy(bool busy)
     {
         _busy = busy;
-        foreach (var name in new[] { "AddButton", "RefreshButton", "FileModeButton", "StartupToggle", "StrictToggle" }) Find<C.Control>(name).IsEnabled = !busy;
+        Find<C.Border>("BusyBar").Visibility = busy ? W.Visibility.Visible : W.Visibility.Collapsed;
+        foreach (var name in new[] { "AddButton", "RefreshButton", "EmptyAddButton", "FileModeButton", "StartupToggle", "StrictToggle" }) Find<C.Control>(name).IsEnabled = !busy;
         Find<C.Button>("CancelEnrollmentButton").IsEnabled = !busy;
         Find<C.Button>("CancelClaudeEnrollmentButton").IsEnabled = !busy;
         foreach (var card in _externalRows.Values) card.SetBusy(busy);
@@ -322,7 +377,13 @@ internal sealed class WidgetForm : IDisposable
     {
         if (_busy || IsDisposed) return;
         Exception? failure = null;
-        try { SetBusy(true); await action(); }
+        try
+        {
+            SetBusy(true);
+            var message = await action();
+            if (!showDialogOnError && (message.StartsWith("Espera ", StringComparison.Ordinal) || message.Contains("Límite de consultas", StringComparison.Ordinal)))
+                _transientNotice = message;
+        }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception ex)
         {
@@ -345,7 +406,7 @@ internal sealed class WidgetForm : IDisposable
             }
         }
     }
-    private async Task RefreshAsync() => await RunAsync(async () =>
+    internal async Task RefreshAsync() => await RunAsync(async () =>
     {
         var history = UpdateHistoryAsync();
         try { return await _service.RefreshAllUsageAsync(null, _lifetime.Token); }
@@ -579,8 +640,9 @@ internal sealed class AccountRow : C.Border, IDisposable
         _reset[index].Text = display.ResetText ?? (index == 0 ? _profile?.SessionResetLabel : _profile?.WeeklyResetLabel) ?? "Sin fecha";
         _fills[index].Width = display.FillWidth(_tracks[index].ActualWidth);
         var color = index == 0 ? _theme.Accent : _theme.WeeklyAccent;
+        var statusColor = _theme.QuotaColor(display.Severity, color);
         _resetBadges[index].Update(display.ResetNotice, _theme, color);
-        _fills[index].Background = _percent[index].Foreground = UiTheme.Brush(color);
+        _fills[index].Background = _percent[index].Foreground = UiTheme.Brush(statusColor);
         _markers[index].Visibility = display.Reference is null ? W.Visibility.Collapsed : W.Visibility.Visible;
         if (display.Reference is not null) _markers[index].Margin = new W.Thickness(display.MarkerOffset(_tracks[index].ActualWidth), -2, 0, -2);
         _markers[index].Background = UiTheme.Brush(_theme.Text, 170);
@@ -607,6 +669,13 @@ internal sealed record UiTheme(bool Dark, bool Transparency, bool HighContrast, 
     public M.Color Accent => HighContrast ? W.SystemColors.HighlightColor : Shade(Dark ? .48 : .18);
     public M.Color WeeklyAccent => HighContrast ? W.SystemColors.HighlightColor : Shade(Dark ? .68 : .35);
     public M.Color Warning => HighContrast ? Text : Dark ? M.Color.FromRgb(231, 189, 116) : M.Color.FromRgb(144, 88, 18);
+    public M.Color Critical => HighContrast ? Text : Dark ? M.Color.FromRgb(242, 118, 114) : M.Color.FromRgb(196, 43, 28);
+    public M.Color QuotaColor(QuotaSeverity severity, M.Color normal) => severity switch
+    {
+        QuotaSeverity.Critical => Critical,
+        QuotaSeverity.Warning => Warning,
+        _ => normal,
+    };
     public static M.SolidColorBrush Brush(M.Color color, byte alpha = 255)
     { var brush = new M.SolidColorBrush(M.Color.FromArgb(alpha, color.R, color.G, color.B)); brush.Freeze(); return brush; }
     public void Apply(W.ResourceDictionary resources, bool acrylic)
@@ -614,6 +683,7 @@ internal sealed record UiTheme(bool Dark, bool Transparency, bool HighContrast, 
         resources["Text"] = Brush(Text); resources["Muted"] = Brush(Muted); resources["Accent"] = Brush(Accent);
         resources["ToggleKnob"] = HighContrast ? W.SystemColors.HighlightTextBrush : Brush(Dark ? Base : M.Colors.White);
         resources["ShellTint"] = Brush(Base, acrylic ? (byte)95 : (byte)255);
+        resources["CardBg"] = Brush(Dark ? M.Colors.White : M.Colors.Black, (byte)10);
         resources["Line"] = Brush(Text, HighContrast ? (byte)255 : (byte)30);
         resources["Hover"] = Brush(Text, 18); resources["Selected"] = Brush(Accent, 28); resources["ScrollThumb"] = Brush(Text, 55);
     }
@@ -660,6 +730,9 @@ internal static class WindowMaterial
         {
             var d = dark ? 1 : 0; var corners = 2;
             DwmSetWindowAttribute(h, 20, ref d, 4); DwmSetWindowAttribute(h, 33, ref corners, 4);
+            // Windows owns the rounded outline. Suppress its default gray border.
+            var borderColor = unchecked((int)0xFFFFFFFE); // DWMWA_COLOR_NONE
+            DwmSetWindowAttribute(h, 34, ref borderColor, 4);
             if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621)) return false;
             var backdrop = transparency ? 3 : 1;
             var ok = DwmSetWindowAttribute(h, 38, ref backdrop, 4) == 0;
