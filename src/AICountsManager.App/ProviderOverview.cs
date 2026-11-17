@@ -41,6 +41,7 @@ internal sealed partial class ProviderOverview : C.Border
         Padding = new(12, 9, 12, 12);
         Margin = new(0, 0, 0, 10);
         Child = _root;
+        System.Windows.Documents.Typography.SetNumeralAlignment(_content, W.FontNumeralAlignment.Tabular);
         var tabs = new C.Primitives.UniformGrid { Columns = 4 };
         C.Button[] buttons = [_today, _week, _quotas, _calendar];
         for (var i = 0; i < buttons.Length; i++)
@@ -170,7 +171,7 @@ internal sealed partial class ProviderOverview : C.Border
             var row = Columns(W.GridLength.Auto, new(1, W.GridUnitType.Star), W.GridLength.Auto, new(56), new(20));
             Put(row, Dot(item.Provider), 0);
             Put(row, Label(ProviderIds.Name(item.Provider), 12, true), 1);
-            Put(row, Label(MetricsHistory.Number(item.Tokens), 12, true), 2);
+            Put(row, Right(MetricsHistory.Number(item.Tokens), 12, true), 2);
             Put(row, Right(Percent(item.Tokens), 10.5, color: _theme.Muted), 3);
             if (!onlyProvider) Put(row, Chevron(expanded ? "\uE70E" : "\uE70D"), 4);
             if (onlyProvider) { row.Height = 33; Add(row, i == 0 ? 4 : 0); }
@@ -199,6 +200,28 @@ internal sealed partial class ProviderOverview : C.Border
         var providerOrder = Series.Select(s => s.Provider).ToArray();
         var chart = new C.Primitives.UniformGrid { Columns = 7, Rows = 1 };
         var max = Math.Max(1, days.Values.Select(d => d.Total).DefaultIfEmpty(0).Max());
+        var dateLabel = Label("", 11, true);
+        var tokenLabel = Right("", 11, true);
+        var choices = new Dictionary<DateOnly, (C.Button Button, C.TextBlock Caption)>();
+        void UpdateDetail()
+        {
+            var selected = _selectedWeekDay is { } date ? days.GetValueOrDefault(date) : null;
+            dateLabel.Text = selected is null ? "" : Cap(selected.Date.ToString("dddd d", MetricsHistory.Culture));
+            tokenLabel.Text = selected is null ? "" : DayAmount(selected);
+        }
+        void SelectDay(DateOnly date)
+        {
+            var previous = _selectedWeekDay;
+            _selectedWeekDay = previous == date ? null : date;
+            if (previous is { } old && choices.TryGetValue(old, out var deselected))
+                StyleWeekDay(deselected.Button, deselected.Caption, false);
+            if (_selectedWeekDay is { } selected)
+            {
+                var choice = choices[selected];
+                StyleWeekDay(choice.Button, choice.Caption, true);
+            }
+            UpdateDetail();
+        }
         for (var i = 0; i < 7; i++)
         {
             var date = start.AddDays(i);
@@ -215,23 +238,31 @@ internal sealed partial class ProviderOverview : C.Border
             band.Children.Add(bar);
             cell.Children.Add(band);
             cell.Children.Add(Rule());
-            var label = Label(Weekdays[i], 10, selected, selected ? _theme.Text : _theme.Muted);
+            var label = Label(Weekdays[i], 10);
             label.HorizontalAlignment = W.HorizontalAlignment.Center;
             label.Margin = new(0, 4, 0, 0);
             cell.Children.Add(label);
             var button = ActionButton(cell, "week-" + date.DayNumber, DayName(date, day),
-                () => { _selectedWeekDay = _selectedWeekDay == date ? null : date; Redraw(); }, 102);
+                () => SelectDay(date), 102);
             button.Margin = new(1, 0, 1, 0);
             button.IsEnabled = day is not null;
             button.BorderThickness = new(1);
-            button.BorderBrush = selected ? UiTheme.Brush(_theme.Accent, 118) : M.Brushes.Transparent;
-            if (selected) button.Background = UiTheme.Brush(_theme.Accent, 22);
+            StyleWeekDay(button, label, selected);
+            choices.Add(date, (button, label));
             chart.Children.Add(button);
         }
         Add(chart, 9);
-        if (_selectedWeekDay is { } selectedDate && days.TryGetValue(selectedDate, out var selectedDay))
-            Add(Pair(Label(Cap(selectedDate.ToString("dddd d", MetricsHistory.Culture)), 11, true), Right(DayAmount(selectedDay), 11, true), 20), 9);
+        UpdateDetail();
+        Add(Pair(dateLabel, tokenLabel, 20), 9);
         if (Series.Count > 0) Add(ProviderKey(), 7);
+    }
+
+    private void StyleWeekDay(C.Button button, C.TextBlock caption, bool selected)
+    {
+        button.BorderBrush = selected ? UiTheme.Brush(_theme.Accent, 118) : M.Brushes.Transparent;
+        button.Background = selected ? UiTheme.Brush(_theme.Accent, 22) : M.Brushes.Transparent;
+        caption.Foreground = UiTheme.Brush(selected ? _theme.Text : _theme.Muted);
+        caption.FontWeight = selected ? W.FontWeights.SemiBold : W.FontWeights.Normal;
     }
 
     private void RenderQuotas(DateOnly start, DateOnly today)
@@ -293,15 +324,15 @@ internal sealed partial class ProviderOverview : C.Border
             start = end;
         }
         var label = new C.StackPanel { Width = 80, IsHitTestVisible = false };
-        var text = Label(DisplayedPeriod.HasKnownTotal ? Compact(DisplayedPeriod.Total) : "—", 17, true);
+        var text = Label(TotalText, 17, true);
         text.TextAlignment = W.TextAlignment.Center;
         var unit = Label("tokens", 9.5, color: _theme.Muted);
         unit.TextAlignment = W.TextAlignment.Center;
-        label.Children.Add(text);
+        label.Children.Add(new C.Viewbox { Child = text, Width = 76, Height = 23, StretchDirection = C.StretchDirection.DownOnly });
         label.Children.Add(unit);
         C.Canvas.SetTop(label, 34); C.Canvas.SetLeft(label, 10);
         ring.Children.Add(label);
-        W.Automation.AutomationProperties.SetName(ring, DisplayedPeriod.HasKnownTotal ? MetricsHistory.Number(DisplayedPeriod.Total) + " tokens" : "Sin historial disponible");
+        W.Automation.AutomationProperties.SetName(ring, DisplayedPeriod.HasKnownTotal ? TotalText + " tokens" : "Sin historial disponible");
         return ring;
     }
 
@@ -333,15 +364,9 @@ internal sealed partial class ProviderOverview : C.Border
         Add(label, 7);
     }
 
-    private C.TextBlock LargeTotal() => Label(DisplayedPeriod.HasKnownTotal ? MetricsHistory.Number(DisplayedPeriod.Total) : "—", 26, true);
+    private string TotalText => DisplayedPeriod.HasKnownTotal ? MetricsHistory.Number(DisplayedPeriod.Total) : "—";
+    private C.TextBlock LargeTotal() => Label(TotalText, 26, true);
     private static string Cap(string text) => char.ToUpper(text[0], MetricsHistory.Culture) + text[1..];
-    private static string Compact(decimal total) => total switch
-    {
-        >= 1_000_000_000 => (total / 1_000_000_000).ToString("0.#", MetricsHistory.Culture) + " mil M",
-        >= 1_000_000 => (total / 1_000_000).ToString("0.#", MetricsHistory.Culture) + " M",
-        >= 1_000 => (total / 1_000).ToString("0.#", MetricsHistory.Culture) + " k",
-        _ => MetricsHistory.Number(total),
-    };
     private string Percent(decimal amount) => (DisplayedPeriod.Total == 0 ? "0" : (amount * 100 / DisplayedPeriod.Total).ToString("0", MetricsHistory.Culture)) + " %";
     private static string DayAmount(MetricsDay day) => day.Total > 0 || day.Covered ? MetricsHistory.Number(day.Total) + " tokens" : "Sin cobertura";
     private static string DayName(DateOnly date, MetricsDay? day) => $"{date.ToString("dddd, d MMMM yyyy", MetricsHistory.Culture)} · {(day is null ? "No disponible" : DayAmount(day))}";

@@ -1,5 +1,6 @@
 using W = System.Windows;
 using C = System.Windows.Controls;
+using I = System.Windows.Input;
 using M = System.Windows.Media;
 
 namespace AICountsManager;
@@ -33,40 +34,115 @@ internal sealed partial class ProviderOverview
     private void OpenPicker(C.Button anchor, DateOnly start, DateOnly cutoff, DateOnly today, bool monthly)
     {
         if (PickerOpen) { ClosePicker(); return; }
-        // The WPF calendar stays scoped to the retained dates and never queries or writes history.
-        var calendar = new C.Calendar
+        const double width = 250;
+        var content = new C.StackPanel();
+        var frame = new C.Border
         {
-            Language = W.Markup.XmlLanguage.GetLanguage("es-ES"),
-            FirstDayOfWeek = DayOfWeek.Monday,
-            DisplayDateStart = cutoff.ToDateTime(TimeOnly.MinValue),
-            DisplayDateEnd = today.ToDateTime(TimeOnly.MinValue),
-            DisplayDate = (start < cutoff ? cutoff : start).ToDateTime(TimeOnly.MinValue),
-            SelectionMode = monthly ? C.CalendarSelectionMode.None : C.CalendarSelectionMode.SingleDate,
-            DisplayMode = monthly ? C.CalendarMode.Year : C.CalendarMode.Month,
-            Background = UiTheme.Brush(_theme.Base),
-            Foreground = UiTheme.Brush(_theme.Text),
-            BorderThickness = new(0),
+            Width = width, Child = content, Padding = new(8), UseLayoutRounding = true,
+            Style = (W.Style?)anchor.TryFindResource("OverlaySurface"),
         };
-        var popup = new C.Primitives.Popup { PlacementTarget = anchor, Placement = C.Primitives.PlacementMode.Bottom, StaysOpen = false,
-            Child = new C.Border { Background = UiTheme.Brush(_theme.Base), BorderBrush = UiTheme.Brush(_theme.Muted, 100),
-                BorderThickness = new(1), Padding = new(5), Child = calendar } };
+        _theme.Apply(frame.Resources, false);
+        if (anchor.TryFindResource(typeof(C.Button)) is W.Style style) frame.Resources[typeof(C.Button)] = style;
+        System.Windows.Documents.TextElement.SetFontFamily(frame, anchor.FontFamily);
+        I.KeyboardNavigation.SetTabNavigation(content, I.KeyboardNavigationMode.Cycle);
+        I.KeyboardNavigation.SetDirectionalNavigation(content, I.KeyboardNavigationMode.Contained);
+        W.Automation.AutomationProperties.SetName(frame, monthly ? "Selector de mes" : "Selector de semana");
+        var popup = new C.Primitives.Popup
+        {
+            PlacementTarget = anchor, Placement = C.Primitives.PlacementMode.Bottom, StaysOpen = false,
+            AllowsTransparency = true, HorizontalOffset = (anchor.ActualWidth - width) / 2, VerticalOffset = 4, Child = frame,
+        };
         _picker = popup;
         popup.Closed += (_, _) => { if (ReferenceEquals(_picker, popup)) _picker = null; };
-        void Apply(DateTime date)
+        void Apply(DateOnly date)
         {
             popup.IsOpen = false;
-            ChoosePeriod(DateOnly.FromDateTime(date));
+            ChoosePeriod(date);
             if (_buttons.TryGetValue("picker", out var button)) button.Focus();
         }
-        calendar.SelectedDatesChanged += (_, _) => { if (!monthly && calendar.SelectedDate is { } day) Apply(day); };
-        calendar.DisplayModeChanged += (_, e) => { if (monthly && e.NewMode == C.CalendarMode.Month) Apply(calendar.DisplayDate); };
-        calendar.PreviewKeyDown += (_, e) =>
+
+        DateOnly Page(DateOnly date) => monthly ? new(date.Year, 1, 1) : MetricsPeriods.Month(date);
+        var firstPage = Page(cutoff);
+        var lastPage = Page(today);
+        var selectedDate = !monthly && _selectedWeekDay is { } day && day >= start && day < start.AddDays(7) ? day : start;
+        var page = Page(selectedDate < cutoff ? cutoff : selectedDate);
+        C.Button? RenderPage(string? focusArrow = null)
         {
-            if (e.Key != System.Windows.Input.Key.Escape) return;
+            content.Children.Clear();
+            var header = Columns(new(28), new(1, W.GridUnitType.Star), new(28));
+            C.Button Arrow(int direction, string id, string title)
+            {
+                var button = PickerButton(CenteredIcon(direction < 0 ? "\uE76B" : "\uE76C"), id, title,
+                    () =>
+                    {
+                        page = monthly ? page.AddYears(direction) : page.AddMonths(direction);
+                        RenderPage(id)?.Focus();
+                    }, 27);
+                button.IsEnabled = direction < 0 ? page > firstPage : page < lastPage;
+                return button;
+            }
+            var previous = Arrow(-1, "picker-previous", monthly ? "Año anterior" : "Mes anterior");
+            var next = Arrow(1, "picker-next", monthly ? "Año siguiente" : "Mes siguiente");
+            var title = new C.StackPanel { Orientation = C.Orientation.Horizontal, HorizontalAlignment = W.HorizontalAlignment.Center };
+            title.Children.Add(Chevron("\uE787", 11, _theme.Accent));
+            var periodCaption = Label(Cap(page.ToString(monthly ? "yyyy" : "MMMM yyyy", MetricsHistory.Culture)), 12, true);
+            periodCaption.Margin = new(6, 0, 0, 0);
+            title.Children.Add(periodCaption);
+            Put(header, previous, 0); Put(header, title, 1); Put(header, next, 2);
+            content.Children.Add(new C.Border
+            {
+                Child = header, CornerRadius = new(8), Margin = new(0, 0, 0, 8),
+                Background = UiTheme.Brush(_theme.Text, 12),
+            });
+
+            if (!monthly) content.Children.Add(CalendarWeekdays());
+            var cells = new C.Primitives.UniformGrid { Columns = monthly ? 4 : 7, Margin = new(0, 3, 0, 0) };
+            content.Children.Add(cells);
+            var dates = monthly ? Enumerable.Range(0, 12).Select(page.AddMonths) :
+                MetricsPeriods.Days(MetricsPeriods.Monday(page), MetricsPeriods.Monday(page.AddMonths(1).AddDays(-1)).AddDays(6));
+            C.Button? preferred = null, firstEnabled = null;
+            foreach (var date in dates)
+            {
+                var enabled = date >= (monthly ? MetricsPeriods.Month(cutoff) : cutoff) && date <= today;
+                var selected = enabled && (monthly ? date == start : date >= start && date < start.AddDays(7));
+                var current = monthly ? date == MetricsPeriods.Month(today) : date == today;
+                var caption = monthly ? Cap(date.ToString("MMM", MetricsHistory.Culture).TrimEnd('.')) : date.Day.ToString(MetricsHistory.Culture);
+                var name = date.ToString(monthly ? "MMMM yyyy" : "dddd, d 'de' MMMM 'de' yyyy", MetricsHistory.Culture);
+                var button = PickerButton(caption, "picker-date-" + date.DayNumber, name, () => Apply(date), monthly ? 33 : 26);
+                button.IsEnabled = enabled;
+                button.Foreground = UiTheme.Brush(monthly || date.Month == page.Month ? _theme.Text : _theme.Muted);
+                button.FontWeight = selected || current ? W.FontWeights.SemiBold : W.FontWeights.Normal;
+                if (selected) button.Background = UiTheme.Brush(_theme.Accent, 55);
+                else if (enabled && (monthly || date.Month == page.Month)) button.Background = UiTheme.Brush(_theme.Text, 12);
+                if (current) { button.BorderBrush = UiTheme.Brush(_theme.Text); button.BorderThickness = new(1); }
+                cells.Children.Add(button);
+                if (!button.IsEnabled) continue;
+                firstEnabled ??= button;
+                if (date == selectedDate || (preferred is null && current)) preferred = button;
+            }
+            var arrow = focusArrow == "picker-previous" ? previous : next;
+            return focusArrow is not null && arrow.IsEnabled ? arrow : preferred ?? firstEnabled;
+        }
+        frame.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != I.Key.Escape) return;
             popup.IsOpen = false; anchor.Focus(); e.Handled = true;
         };
+        var initialFocus = RenderPage();
         popup.IsOpen = true;
-        calendar.Focus();
+        initialFocus?.Focus();
+    }
+
+    private static C.Button PickerButton(object content, string key, string name, Action action, double height)
+    {
+        var button = new C.Button
+        {
+            Content = content, Tag = key, FontSize = 11.5,
+            MinHeight = 0, Height = height, Padding = new(0), Margin = new(1),
+        };
+        W.Automation.AutomationProperties.SetName(button, name);
+        button.Click += (_, _) => { if (button.IsEnabled) action(); };
+        return button;
     }
 
     private static string WeekRange(DateOnly start, DateOnly end)
@@ -94,14 +170,7 @@ internal sealed partial class ProviderOverview
         Add(LargeTotal(), 11);
         Add(Label(start == MetricsPeriods.Month(today) ? "Tokens registrados este mes" : "Tokens registrados en el mes", 10.5, color: _theme.Muted), 2);
         var days = DisplayedPeriod.Days.ToDictionary(day => day.Date);
-        var weekdays = new C.Primitives.UniformGrid { Columns = 7 };
-        foreach (var day in Weekdays)
-        {
-            var label = Label(day, 10, true, _theme.Muted);
-            label.HorizontalAlignment = W.HorizontalAlignment.Center;
-            weekdays.Children.Add(label);
-        }
-        Add(weekdays, 11);
+        Add(CalendarWeekdays(), 11);
 
         var cells = new C.Primitives.UniformGrid { Columns = 7, FirstColumn = (start.DayNumber - MetricsPeriods.Monday(start).DayNumber), Margin = new(0) };
         foreach (var date in MetricsPeriods.Days(start, end))
@@ -111,14 +180,14 @@ internal sealed partial class ProviderOverview
             var enabled = day is { Total: > 0 };
             var current = date == today;
             var selected = date == _selectedMonthDay && enabled;
+            var foreground = level == 4 ? HeatText() : day is { Total: 0, Covered: false } ? _theme.Muted : _theme.Text;
             var plate = new C.Border
             {
                 Height = 20, CornerRadius = new(4), Background = HeatBrush(level),
-                BorderThickness = new(current || selected ? 1 : 0),
-                BorderBrush = current ? UiTheme.Brush(_theme.Text) : UiTheme.Brush(_theme.Accent),
+                BorderThickness = new(selected ? 2 : current ? 1 : 0),
+                BorderBrush = selected || current ? UiTheme.Brush(foreground) : null,
                 Opacity = day is null ? .39 : 1,
             };
-            var foreground = level == 4 ? HeatText() : day is { Total: 0, Covered: false } ? _theme.Muted : _theme.Text;
             var number = Label(date.Day.ToString(MetricsHistory.Culture), 10, current || selected, foreground);
             number.HorizontalAlignment = W.HorizontalAlignment.Center;
             plate.Child = number;
@@ -173,6 +242,19 @@ internal sealed partial class ProviderOverview
                 Add(Pair(provider, Right(MetricsHistory.Number(item.Tokens), 10.5), 19), 0, 0, 4);
             }
         }
+    }
+
+    private C.Primitives.UniformGrid CalendarWeekdays()
+    {
+        var headings = new C.Primitives.UniformGrid { Columns = 7 };
+        for (var day = 0; day < 7; day++)
+        {
+            var name = MetricsHistory.Culture.DateTimeFormat.AbbreviatedDayNames[(day + 1) % 7];
+            var label = Label(Cap(name.TrimEnd('.')), 10, true, _theme.Muted);
+            label.HorizontalAlignment = W.HorizontalAlignment.Center;
+            headings.Children.Add(label);
+        }
+        return headings;
     }
 
     private static readonly byte[] HeatOpacity = [11, 38, 76, 129, 255];

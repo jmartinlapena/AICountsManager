@@ -23,7 +23,14 @@ internal static class ProviderIcons
     public static M.Color Color(string provider, UiTheme theme, int variant = 0)
     {
         if (theme.HighContrast) return W.SystemColors.HighlightColor;
-        if (provider == ProviderIds.Codex) return variant == 0 ? theme.Accent : theme.WeeklyAccent;
+        if (provider == ProviderIds.Codex)
+            return (theme.Dark, variant == 0) switch
+            {
+                (true, true) => M.Color.FromRgb(106, 174, 232),
+                (true, false) => M.Color.FromRgb(147, 198, 240),
+                (false, true) => M.Color.FromRgb(0, 96, 171),
+                (false, false) => M.Color.FromRgb(0, 76, 139),
+            };
         var color = provider switch { ProviderIds.Claude => M.Color.FromRgb(210, 119, 87), ProviderIds.Cursor => M.Color.FromRgb(40, 167, 133), _ => M.Color.FromRgb(143, 102, 225) }; var mix = theme.Dark ? .12 + Math.Clamp(variant, 0, 3) * .14 : -.20 - Math.Clamp(variant, 0, 3) * .10;
         return M.Color.FromRgb((byte)Math.Clamp(color.R + (255 - color.R) * mix, 0, 255),
             (byte)Math.Clamp(color.G + (255 - color.G) * mix, 0, 255), (byte)Math.Clamp(color.B + (255 - color.B) * mix, 0, 255));

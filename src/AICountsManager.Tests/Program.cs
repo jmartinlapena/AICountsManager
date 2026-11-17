@@ -11,6 +11,8 @@ internal static partial class Program
     [
         ("metrics distinguish partial coverage and handle retained cross-year periods", MetricsCoverageAsync),
         ("metrics navigation has no I/O and F5 preserves the shared week", MetricsNavigationIoAsync),
+        ("metrics selectors use readable themes and Codex owns its colors", MetricsAppearanceAsync),
+        ("metrics shared dialog surface preserves editing, default action and cancellation", WidgetDialogsAsync),
         ("metrics main and settings use the same verified DWM material and accessible fallback", MetricsMaterialAsync),
         ("review validates Codex destinations, rejects empty quotas and shows weekly tray balance", ReviewCodexQuotaAsync),
         ("review scopes rate limits by provider and shares manual and automatic Codex backoff", ReviewProviderBackoffAsync),

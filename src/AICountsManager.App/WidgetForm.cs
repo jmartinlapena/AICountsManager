@@ -469,7 +469,7 @@ internal sealed class WidgetForm : IDisposable
     }
     private async Task DeleteAsync(string name)
     {
-        if (_busy || !Confirm("Eliminar perfil", $"Se eliminará «{name}» de AICountsManager y se conservará una copia local. Tu cuenta de OpenAI no se eliminará.", "Eliminar")) return;
+        if (_busy || !Confirm("Eliminar perfil", $"Se eliminará «{name}» de AICountsManager y se conservará una copia local. Tu cuenta de OpenAI no se eliminará.", "Eliminar", destructive: true)) return;
         await RunAsync(async () => { await _service.DeleteProfileAsync(name); return "Perfil eliminado. Copia local conservada."; });
     }
     private async Task SwitchAsync(string name)
@@ -499,7 +499,7 @@ internal sealed class WidgetForm : IDisposable
     }
     private async Task ClaudeDeleteAsync(string id)
     {
-        if (_busy || !Confirm("Eliminar perfil de Claude", "Se retirará este perfil del gestor y se conservará una copia cifrada local. Tu cuenta de Claude no se eliminará.", "Eliminar")) return;
+        if (_busy || !Confirm("Eliminar perfil de Claude", "Se retirará este perfil del gestor y se conservará una copia cifrada local. Tu cuenta de Claude no se eliminará.", "Eliminar", destructive: true)) return;
         await RunAsync(async () => { await _service.DeleteClaudeAccountAsync(id); return "Perfil retirado. Copia local conservada."; });
     }
     private void ShowError(string text)
@@ -508,37 +508,17 @@ internal sealed class WidgetForm : IDisposable
     }
     private string? AskName(string title, string prompt, string initial)
     {
-        var input = new C.TextBox { Text = initial, MaxLength = 64, Margin = new W.Thickness(0, 12, 0, 16) };
+        var input = new C.TextBox { Text = initial, MaxLength = 64 };
         W.Automation.AutomationProperties.SetName(input, prompt);
         return Dialog(title, prompt, "Guardar", input) && !string.IsNullOrWhiteSpace(input.Text) ? input.Text.Trim() : null;
     }
-    private bool Confirm(string title, string text, string action) => Dialog(title, text, action, null);
-    private bool Dialog(string title, string text, string action, C.TextBox? input, bool allowCancel = true)
+    private bool Confirm(string title, string text, string action, bool destructive = false) =>
+        Dialog(title, text, action, null, destructive: destructive);
+    private bool Dialog(string title, string text, string action, C.TextBox? input, bool allowCancel = true, bool destructive = false)
     {
         _dialogOpen = true;
-        var dialog = new W.Window { Owner = _window, Title = title, Width = 380, SizeToContent = W.SizeToContent.Height, WindowStartupLocation = W.WindowStartupLocation.CenterOwner,
-            WindowStyle = W.WindowStyle.None, ResizeMode = W.ResizeMode.NoResize, ShowInTaskbar = false, Background = M.Brushes.Transparent, Foreground = UiTheme.Brush(_theme.Text), FontFamily = new M.FontFamily("Segoe UI"), FontSize = 12 };
-        dialog.Resources.MergedDictionaries.Add(_window.Resources);
-        var content = new C.StackPanel { Margin = new W.Thickness(22) };
-        content.Children.Add(new C.TextBlock { Text = title, FontSize = 17, FontWeight = W.FontWeights.SemiBold, Margin = new W.Thickness(0, 0, 0, 12) });
-        content.Children.Add(new C.TextBlock { Text = text, TextWrapping = W.TextWrapping.Wrap, Foreground = UiTheme.Brush(_theme.Muted), Margin = new W.Thickness(0, 0, 0, 16) });
-        if (input is not null) content.Children.Add(input);
-        var buttons = new C.StackPanel { Orientation = C.Orientation.Horizontal, HorizontalAlignment = W.HorizontalAlignment.Right };
-        var cancel = new C.Button { Content = "Cancelar", IsCancel = true, Margin = new W.Thickness(0, 0, 8, 0) };
-        var confirm = new C.Button { Content = action, IsDefault = true, Background = UiTheme.Brush(_theme.Accent, 35), BorderThickness = new W.Thickness(1) };
-        cancel.Click += (_, _) => dialog.DialogResult = false; confirm.Click += (_, _) => dialog.DialogResult = true;
-        if (allowCancel) buttons.Children.Add(cancel); buttons.Children.Add(confirm); content.Children.Add(buttons);
-        var border = new C.Border { CornerRadius = new W.CornerRadius(14), BorderThickness = new W.Thickness(1), BorderBrush = UiTheme.Brush(_theme.Text, 30), Background = UiTheme.Brush(_theme.Base), Child = content };
-        dialog.Content = border;
-        dialog.SourceInitialized += (_, _) =>
-        {
-            var handle = new Interop.WindowInteropHelper(dialog).Handle;
-            var acrylic = WindowMaterial.Apply(handle, _theme.Dark, _theme.Transparency && !_theme.HighContrast);
-            if (acrylic) { Interop.HwndSource.FromHwnd(handle).CompositionTarget.BackgroundColor = M.Colors.Transparent; border.Background = UiTheme.Brush(_theme.Base, 110); }
-        };
-        dialog.Loaded += (_, _) => { if (input is not null) { input.Focus(); input.SelectAll(); } };
-        try { return dialog.ShowDialog() == true; }
-        finally { dialog.Close(); _dialogOpen = false; }
+        try { return WidgetDialog.Create(_window, _theme, title, text, action, input, allowCancel, destructive).ShowDialog() == true; }
+        finally { _dialogOpen = false; }
     }
     public void Dispose()
     {
@@ -635,17 +615,18 @@ internal sealed class AccountRow : C.Border, IDisposable
         _resets.Update(p.Resets, _theme);
         _plan.Text = AccountPlan.Label(p.PlanType) ?? "";
         _planBadge.Visibility = _plan.Text.Length == 0 ? W.Visibility.Collapsed : W.Visibility.Visible;
-        _plan.Foreground = UiTheme.Brush(_theme.Accent);
-        _planBadge.Background = UiTheme.Brush(_theme.Accent, _theme.HighContrast ? (byte)0 : (byte)20);
+        var color = ProviderIcons.Color(ProviderIds.Codex, _theme);
+        _plan.Foreground = UiTheme.Brush(color);
+        _planBadge.Background = UiTheme.Brush(color, _theme.HighContrast ? (byte)0 : (byte)20);
         _quotaSections[0].Visibility = p.SessionLimitNotApplicable ? W.Visibility.Collapsed : W.Visibility.Visible;
         _quotaSections[1].Margin = new W.Thickness(0, p.SessionLimitNotApplicable ? 0 : 10, 0, 0);
         _name.Text = p.Name; _email.Text = p.Email ?? "Perfil local";
-        _badge.Text = "● Activa"; _badge.Foreground = UiTheme.Brush(_theme.Accent); _badge.Visibility = p.IsActive ? W.Visibility.Visible : W.Visibility.Collapsed;
+        _badge.Text = "● Activa"; _badge.Foreground = UiTheme.Brush(color); _badge.Visibility = p.IsActive ? W.Visibility.Visible : W.Visibility.Collapsed;
         _updated.Text = p.UpdatedLabel; _updated.Visibility = p.IsActive ? W.Visibility.Visible : W.Visibility.Collapsed;
         _activate.Visibility = p.IsActive ? W.Visibility.Collapsed : W.Visibility.Visible;
         W.Automation.AutomationProperties.SetName(_activate, "Activar " + p.Name); _delete.IsEnabled = !p.IsActive;
         Background = UiTheme.Brush(_theme.Dark ? M.Colors.White : M.Colors.Black, p.IsActive ? (byte)17 : (byte)10);
-        BorderBrush = UiTheme.Brush(p.IsActive ? _theme.Accent : _theme.Text, p.IsActive ? (byte)35 : (byte)0);
+        BorderBrush = UiTheme.Brush(color, p.IsActive ? (byte)35 : (byte)0);
         for (var i = 0; i < 2; i++) SetFill(i);
         _notice.Visibility = p.Status is "error" or "stale" ? W.Visibility.Visible : W.Visibility.Collapsed;
         _notice.Text = p.Status == "error" ? p.Error ?? QuotaFailure.Unknown : "Datos antiguos · " + p.UpdatedLabel;
@@ -659,7 +640,7 @@ internal sealed class AccountRow : C.Border, IDisposable
         _percent[index].Text = display.RemainingText + (remaining.HasValue ? " restante" : "");
         _reset[index].Text = display.ResetText ?? (index == 0 ? _profile?.SessionResetLabel : _profile?.WeeklyResetLabel) ?? "Sin fecha";
         _fills[index].Width = display.FillWidth(_tracks[index].ActualWidth);
-        var color = index == 0 ? _theme.Accent : _theme.WeeklyAccent;
+        var color = ProviderIcons.Color(ProviderIds.Codex, _theme, index);
         var statusColor = _theme.QuotaColor(display.Severity, color);
         _resetBadges[index].Update(display.ResetNotice, _theme, color);
         _fills[index].Background = _percent[index].Foreground = UiTheme.Brush(statusColor);
@@ -682,13 +663,13 @@ internal sealed class AccountRow : C.Border, IDisposable
 
 internal sealed record UiTheme(bool Dark, bool Transparency, bool HighContrast, M.Color? TaskbarColor = null, M.Color? SystemAccent = null)
 {
-    public M.Color Base => HighContrast ? W.SystemColors.WindowColor : TaskbarColor ?? (Dark ? M.Color.FromRgb(29, 30, 32) : M.Color.FromRgb(240, 242, 244));
+    public M.Color Surface => HighContrast ? W.SystemColors.WindowColor : Dark ? M.Color.FromRgb(29, 30, 32) : M.Color.FromRgb(240, 242, 244);
+    public M.Color Base => HighContrast ? Surface : TaskbarColor ?? Surface;
     public M.Color Text => HighContrast ? W.SystemColors.WindowTextColor : Dark ? M.Color.FromRgb(243, 245, 247) : M.Color.FromRgb(28, 32, 37);
     public M.Color Muted => HighContrast ? Text : Dark ? M.Color.FromRgb(173, 182, 190) : M.Color.FromRgb(83, 95, 104);
     private M.Color RawAccent => SystemAccent ?? M.Color.FromRgb(0, 120, 212);
     private M.Color Shade(double mix) => M.Color.FromRgb((byte)(RawAccent.R * (1 - mix) + (Dark ? 255 : 0) * mix), (byte)(RawAccent.G * (1 - mix) + (Dark ? 255 : 0) * mix), (byte)(RawAccent.B * (1 - mix) + (Dark ? 255 : 0) * mix));
     public M.Color Accent => HighContrast ? W.SystemColors.HighlightColor : Shade(Dark ? .48 : .18);
-    public M.Color WeeklyAccent => HighContrast ? W.SystemColors.HighlightColor : Shade(Dark ? .68 : .35);
     public M.Color Warning => HighContrast ? Text : Dark ? M.Color.FromRgb(231, 189, 116) : M.Color.FromRgb(144, 88, 18);
     public M.Color Critical => HighContrast ? Text : Dark ? M.Color.FromRgb(242, 118, 114) : M.Color.FromRgb(196, 43, 28);
     public M.Color QuotaColor(QuotaSeverity severity, M.Color normal) => severity switch
@@ -704,6 +685,8 @@ internal sealed record UiTheme(bool Dark, bool Transparency, bool HighContrast, 
         resources["Text"] = Brush(Text); resources["Muted"] = Brush(Muted); resources["Accent"] = Brush(Accent);
         resources["ToggleKnob"] = HighContrast ? W.SystemColors.HighlightTextBrush : Brush(Dark ? Base : M.Colors.White);
         resources["ShellTint"] = acrylic && !HighContrast ? M.Brushes.Transparent : Brush(Base);
+        resources["OverlayBackground"] = Brush(Surface);
+        resources["OverlayEdge"] = Brush(HighContrast ? Text : Dark ? M.Color.FromRgb(70, 73, 79) : M.Color.FromRgb(197, 204, 211));
         resources["CardBg"] = Brush(Dark ? M.Colors.White : M.Colors.Black, (byte)10);
         resources["Line"] = Brush(Text, HighContrast ? (byte)255 : (byte)30);
         resources["Hover"] = Brush(Text, 18); resources["Selected"] = Brush(Accent, 28); resources["ScrollThumb"] = Brush(Text, 55);
