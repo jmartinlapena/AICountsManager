@@ -9,6 +9,9 @@ internal static partial class Program
 {
     private static readonly (string Name, Func<Task> Run)[] Tests =
     [
+        ("metrics distinguish partial coverage and handle retained cross-year periods", MetricsCoverageAsync),
+        ("metrics navigation has no I/O and F5 preserves the shared week", MetricsNavigationIoAsync),
+        ("metrics main and settings use the same verified DWM material and accessible fallback", MetricsMaterialAsync),
         ("review validates Codex destinations, rejects empty quotas and shows weekly tray balance", ReviewCodexQuotaAsync),
         ("review scopes rate limits by provider and shares manual and automatic Codex backoff", ReviewProviderBackoffAsync),
         ("review keeps Claude quota readings and backoff isolated by account", ReviewClaudeBackoffAsync),
@@ -137,6 +140,16 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args is ["--render-metrics", var metricsOutput]) { await RenderMetricsAsync(metricsOutput); return 0; }
+        if (args is ["--metrics-tests"])
+        {
+            foreach (var test in Tests.Where(t => t.Name.StartsWith("metrics ", StringComparison.Ordinal) || t.Run.Method.Name == nameof(HistoryDaySelectionAsync)))
+            {
+                try { await test.Run(); Console.WriteLine("PASS " + test.Name); }
+                catch (Exception ex) { Console.WriteLine(ex); return 1; }
+            }
+            return 0;
+        }
         if (args is ["--quota-feedback-tests"])
         {
             try { foreach (var t in Tests.Where(t => t.Name.StartsWith("quota feedback", StringComparison.Ordinal))) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }

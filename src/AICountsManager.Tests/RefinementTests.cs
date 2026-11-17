@@ -10,43 +10,6 @@ internal static partial class Program
     private static T UiField<T>(object owner, string name) => (T)owner.GetType().GetField(name,
         System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(owner)!;
     private static void UiClick(C.Button button) => button.RaiseEvent(new W.RoutedEventArgs(C.Button.ClickEvent));
-    private static Task HistoryDaySelectionAsync() => RunOnUiThreadAsync(() =>
-    {
-        var theme = new UiTheme(true, false, false);
-        var panel = new HistoryPanel(theme);
-        var today = DateOnly.FromDateTime(DateTime.Today); var monday = HistoryPanel.Monday(today);
-        var data = new TokenHistorySnapshot(Enumerable.Range(0, 14).Select(i => new TokenDay(today.AddDays(i - 13).ToString("yyyy-MM-dd"),
-            new Dictionary<string, long> { ["model-" + i] = 1_234_567 + i })).ToArray(), false, DateTimeOffset.UtcNow.ToString("O"), null);
-        panel.Update(data); panel.ShowPeriod(false);
-        var total = UiField<C.TextBlock>(panel, "_total"); var period = UiField<C.TextBlock>(panel, "_period");
-        var chart = UiField<C.Grid>(panel, "_chart");
-        var summary = total.Text; var summaryPeriod = period.Text;
-        var names = chart.Children.Cast<C.Button>().Select(W.Automation.AutomationProperties.GetName).ToArray();
-        UiClick((C.Button)chart.Children[0]);
-        var expected = data.Days.Single(d => d.Date == monday.ToString("yyyy-MM-dd"));
-        Check(total.Text == expected.Total.ToString("N0") && period.Text == monday.ToString("dddd, dd MMM yyyy"), "Day click did not show exact tokens/date.");
-        Check(chart.Children.Cast<C.Button>().Select(W.Automation.AutomationProperties.GetName).SequenceEqual(names), "Selecting a day shifted the chart.");
-        UiClick(UiField<C.Button>(panel, "_models"));
-        var details = UiField<C.StackPanel>(panel, "_details");
-        Check(details.Children.Count == 1 && ((C.TextBlock)((C.DockPanel)details.Children[0]).Children[1]).Text == expected.Models.Keys.Single(), "Model breakdown still includes the whole week.");
-        panel.Update(data); panel.SetTheme(theme with { Dark = false });
-        Check(total.Text == expected.Total.ToString("N0"), "Refresh or theme change cleared selected day.");
-        UiClick((C.Button)chart.Children[0]);
-        Check(total.Text == summary && period.Text == summaryPeriod, "Second click failed to restore weekly total.");
-        foreach (var (button, i) in chart.Children.Cast<C.Button>().Select((b, i) => (b, i)))
-            Check(button.IsEnabled == (monday.AddDays(i) <= today), "Future day is selectable.");
-        UiClick((C.Button)chart.Children[0]); UiClick(UiField<C.Button>(panel, "_previous"));
-        Check(!period.Text.Contains(monday.ToString("dddd, dd MMM yyyy")), "Week navigation retained unrelated daily selection.");
-        panel.ShowPeriod(true);
-        var yesterday = today.AddDays(-1); UiClick((C.Button)chart.Children[5]);
-        Check(total.Text == data.Days.Single(d => d.Date == yesterday.ToString("yyyy-MM-dd")).Total.ToString("N0"), "Daily view click did not select yesterday.");
-        panel.Update(data with { Days = Array.Empty<TokenDay>() });
-        Check(total.Text == "0", "Day with no activity did not show zero.");
-        panel.Update(TokenHistorySnapshot.Empty);
-        Check(total.Text == "—", "Unknown history was represented as a measured zero.");
-        return Task.CompletedTask;
-    });
-
     private static Task BusinessPremiumAsync() => InTemporaryStoreAsync(paths =>
     {
         var usage = UsageClient.NormalizeWhamUsage(PlanPayload("self_serve_business_prolite"));

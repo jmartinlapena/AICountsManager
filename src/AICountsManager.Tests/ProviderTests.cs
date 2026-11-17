@@ -184,45 +184,38 @@ internal static partial class Program
         var sampleHistory = ProviderHistory.Merge(SampleHistory(), SampleAntigravityHistory());
         form.SetHistoryPreview(sampleHistory);
         Check(overview.Series.Count == 2 && overview.Series.Count(s => s.Provider == ProviderIds.Antigravity) == 1, "Summary did not group Antigravity into one segment.");
-        var monday = HistoryPanel.Monday(DateOnly.FromDateTime(DateTime.Today));
+        Check(overview.SelectedView == UsageView.Today, "Today is not the default view.");
+        var monday = MetricsPeriods.Monday(DateOnly.FromDateTime(DateTime.Today));
+        UiClick(UiField<C.Button>(overview, "_quotas"));
         var expected = SampleHistory().Days.Where(d => DateOnly.Parse(d.Date) >= monday).Sum(d => (decimal)d.Total);
         Check(overview.Series.Single(s => s.Provider == ProviderIds.Codex).Tokens == expected && overview.Series.Single(s => s.Provider == ProviderIds.Antigravity).Tokens == 300, "Summary did not use weekly tokens isolated by provider.");
         var card = UiField<Dictionary<string,CurrentProviderCard>>(form,"_externalRows")[AccountOrdering.Current(ProviderIds.Antigravity)];
         static bool HasButton(W.DependencyObject x) => x is C.Button || Enumerable.Range(0,M.VisualTreeHelper.GetChildrenCount(x)).Any(i => HasButton(M.VisualTreeHelper.GetChild(x,i)));
         Check(!HasButton(card), "Antigravity account exposes actions.");
-        var historyPanel = UiField<HistoryPanel>(form, "_historyPanel");
-        Check(overview.SelectedView == UsageView.Today && historyPanel.Visibility == W.Visibility.Visible, "Today is not the default view.");
         form.SetHistoryPreview(SampleHistory());
-        var todayPeriod = UiField<C.TextBlock>(historyPanel, "_period").Text;
         UiClick(UiField<C.Button>(overview, "_week"));
-        Check(overview.SelectedView == UsageView.Week && UiField<C.TextBlock>(historyPanel, "_period").Text != todayPeriod, "Week tab did not switch history period.");
-        UiClick(UiField<C.Button>(historyPanel, "_previous"));
-        var previousPeriod = UiField<C.TextBlock>(historyPanel, "_period").Text;
+        Check(overview.SelectedView == UsageView.Week && overview.PeriodStart == monday, "Week tab did not switch history period.");
+        UiClick(MetricButton(overview, "previous"));
+        var previousPeriod = overview.PeriodStart;
         form.ApplyState(state);
-        Check(overview.SelectedView == UsageView.Week && UiField<C.TextBlock>(historyPanel, "_period").Text == previousPeriod, "Refresh reset the selected history period.");
-        UiClick(UiField<C.Button>(overview,"_today")); Check(UiField<HistoryPanel>(form,"_historyPanel").Visibility == W.Visibility.Visible, "Tokens tab inaccessible.");
-        UiClick(UiField<C.Button>(overview,"_quotas")); Check(UiField<HistoryPanel>(form,"_historyPanel").Visibility == W.Visibility.Collapsed, "Quota tab did not restore compact layout.");
-        Check(UiField<C.Grid>(overview, "_body").Visibility == W.Visibility.Visible, "Quota overview is hidden.");
+        Check(overview.SelectedView == UsageView.Week && overview.PeriodStart == previousPeriod, "Refresh reset the selected history period.");
+        UiClick(UiField<C.Button>(overview,"_quotas"));
+        Check(overview.PeriodStart == previousPeriod && MetricText(overview).Contains("Reparto de tokens"), "Quota view did not reuse the selected week.");
         UiClick(UiField<C.Button>(overview, "_today"));
-        Check(UiField<C.TextBlock>(historyPanel, "_period").Text == todayPeriod, "Today tab did not restore the current day.");
         var today = DateOnly.FromDateTime(DateTime.Today);
+        Check(overview.DisplayedPeriod.Days.Single().Date == today, "Today tab did not restore the current day.");
         var boundaryHistory = new TokenHistorySnapshot([
             new(monday.AddDays(-1).ToString("yyyy-MM-dd"), new Dictionary<string, long> { ["outside-week"] = 900 }),
             new(today.ToString("yyyy-MM-dd"), new Dictionary<string, long> { ["used-model"] = 100, ["unused-model"] = 0 }),
             new(today.AddDays(1).ToString("yyyy-MM-dd"), new Dictionary<string, long> { ["future"] = 800 })
         ], false, DateTimeOffset.UtcNow.ToString("O"), null);
         form.SetHistoryPreview(ProviderHistory.Merge(boundaryHistory, TokenHistorySnapshot.Empty));
-        Check(overview.Series.Count == 1 && overview.Series[0].Tokens == 100, "Donut includes other weeks, future dates or missing-provider usage.");
-        UiClick(UiField<C.Button>(historyPanel, "_models"));
-        var modelLines = UiField<C.StackPanel>(historyPanel, "_details").Children.Cast<C.DockPanel>().ToArray();
-        Check(modelLines.Length == 2 && modelLines.SelectMany(p => p.Children.OfType<C.TextBlock>()).All(t => !t.Text.Contains("sin datos") && !t.Text.Contains("unused-model") && !t.Text.Contains("Antigravity")), "Model details show missing or zero-use rows.");
+        Check(overview.Series.Count == 1 && overview.Series[0].Tokens == 100, "Today includes other weeks, future dates or missing-provider usage.");
+        Check(MetricText(overview).Contains("used-model") && !MetricText(overview).Contains("unused-model"), "Single provider did not show active models directly.");
         form.SetHistoryPreview(boundaryHistory with { Days = [] });
-        Check(overview.Series.Count == 0 && UiField<C.StackPanel>(historyPanel, "_details").Children.Count == 0, "Known zero use invents segments or model rows.");
-        var center = UiField<C.Canvas>(overview, "_rings").Children.OfType<C.StackPanel>().Single();
-        Check(((C.TextBlock)center.Children[0]).Text == "0", "Measured zero is not shown as zero.");
+        Check(overview.Series.Count == 0 && MetricText(overview).Contains("0"), "Known zero use invents segments or did not show zero.");
         form.SetHistoryPreview(TokenHistorySnapshot.Empty);
-        center = UiField<C.Canvas>(overview, "_rings").Children.OfType<C.StackPanel>().Single();
-        Check(overview.Series.Count == 0 && ((C.TextBlock)center.Children[0]).Text == "—", "Unavailable history is shown as measured zero.");
+        Check(overview.Series.Count == 0 && MetricText(overview).Contains("—"), "Unavailable history is shown as measured zero.");
         form.ApplyState(state with { OtherAccounts = [] }); Check(UiField<Dictionary<string,CurrentProviderCard>>(form,"_externalRows").Count == 0 && form.Rows.Count == state.Profiles.Count, "Provider removal damaged Codex cards.");
         return Task.CompletedTask;
     }));
@@ -252,7 +245,7 @@ internal static partial class Program
             UiClick(UiField<C.Button>(overview, "_quotas")); form.Visual.UpdateLayout();
             Save(form.Visual,Path.Combine(output,dark?"cuotas-oscuro.png":"cuotas-claro.png"));
             form.SetHistoryPreview(history); UiClick(UiField<C.Button>(UiField<ProviderOverview>(form,"_overview"),"_today"));
-            UiClick(UiField<C.Button>(UiField<HistoryPanel>(form,"_historyPanel"),"_models")); form.Visual.UpdateLayout();
+            UiClick(MetricButton(overview, "provider-" + ProviderIds.Claude)); form.Visual.UpdateLayout();
             Save(form.Visual,Path.Combine(output,dark?"tokens-oscuro.png":"tokens-claro.png"));
             UiClick(UiField<C.Button>(overview, "_week")); form.Visual.UpdateLayout();
             Save(form.Visual,Path.Combine(output,dark?"semana-oscuro.png":"semana-claro.png"));

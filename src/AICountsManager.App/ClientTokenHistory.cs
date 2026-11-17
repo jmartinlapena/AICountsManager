@@ -178,7 +178,7 @@ internal sealed class CursorTokenHistory(IClientSessionSource sessions, HttpClie
             if (DateTimeOffset.UtcNow < _next) return Snapshot;
             _next = DateTimeOffset.UtcNow.AddMinutes(5);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(8));
-            var today = DateOnly.FromDateTime(DateTime.Today); var monday = HistoryPanel.Monday(today);
+            var today = DateOnly.FromDateTime(DateTime.Today); var monday = MetricsPeriods.Monday(today);
             var start = new DateTimeOffset(monday.ToDateTime(TimeOnly.MinValue)); var end = DateTimeOffset.Now;
             var events = new List<ClientTokenEvent>(); var seen = new HashSet<string>(); int readCount = 0; bool complete = false;
             for (var page = 1; page <= 4; page++)
@@ -203,7 +203,9 @@ internal sealed class CursorTokenHistory(IClientSessionSource sessions, HttpClie
             if (!complete) return _snapshot = Snapshot with { Partial = true, Error = "Historial de Cursor incompleto; se conserva la última lectura." };
             var days = Snapshot.Days.Where(d => string.CompareOrdinal(d.Date, monday.ToString("yyyy-MM-dd")) < 0 && DateOnly.Parse(d.Date) >= today.AddDays(-364))
                 .Concat(ClaudeTokenHistory.ToDays(events.Where(e => string.CompareOrdinal(e.Date, monday.ToString("yyyy-MM-dd")) >= 0 && string.CompareOrdinal(e.Date, today.ToString("yyyy-MM-dd")) <= 0))).OrderBy(d => d.Date).ToArray();
-            _snapshot = new(days, false, DateTimeOffset.UtcNow.ToString("O"), null);
+            var covered = (Snapshot.CoveredDays ?? new HashSet<DateOnly>()).Where(day => day >= MetricsPeriods.Cutoff(today))
+                .Concat(MetricsPeriods.Days(monday, today)).ToHashSet();
+            _snapshot = new(days, false, DateTimeOffset.UtcNow.ToString("O"), null, CoveredDays: covered);
             AtomicFile.WriteText(cachePath, JsonSerializer.Serialize(new Saved(identity, days, _snapshot.UpdatedAt)));
             return Snapshot;
         }

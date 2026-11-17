@@ -20,7 +20,6 @@ internal sealed class WidgetForm : IDisposable
     private readonly Dictionary<string, AccountRow> _rows = new(StringComparer.OrdinalIgnoreCase);
     private readonly Threading.DispatcherTimer _clock;
     private DashboardState? _state;
-    private readonly HistoryPanel _historyPanel;
     private readonly ProviderOverview _overview;
     private readonly Dictionary<string, CurrentProviderCard> _externalRows = new();
     private readonly C.ContextMenu _addMenu = new();
@@ -44,15 +43,14 @@ internal sealed class WidgetForm : IDisposable
     internal bool AcrylicEnabled { get; private set; }
     private T Find<T>(string name) where T : W.FrameworkElement => (T)_window.FindName(name);
 
-    public WidgetForm(AICountsManagerService service, UiTheme? theme = null, bool startClock = true)
+    public WidgetForm(AICountsManagerService service, UiTheme? theme = null, bool startClock = true, Func<DateOnly>? metricsDate = null)
     {
         _clockEnabled = startClock;
         _service = service; _fixedTheme = theme; _theme = theme ?? UiTheme.Read();
         using var stream = typeof(WidgetForm).Assembly.GetManifestResourceStream("AICountsManager.WidgetWindow.xaml")
             ?? throw new InvalidOperationException("No se encontró la interfaz de AICountsManager.");
         _window = (W.Window)System.Windows.Markup.XamlReader.Load(stream);
-        _historyPanel = new HistoryPanel(_theme);
-        _overview = new ProviderOverview(_theme, _historyPanel);
+        _overview = new ProviderOverview(_theme, metricsDate);
         var dashboard = Find<C.StackPanel>("DashboardStack");
         dashboard.Children.Insert(0, _overview);
         AccountMenuStyle.Apply(_addMenu);
@@ -83,12 +81,17 @@ internal sealed class WidgetForm : IDisposable
         {
             if (!Visible)
             {
+                _overview.ClosePicker();
                 _historyTimer.Stop();
                 _historyCancellation?.Cancel();
                 _clock?.Stop();
                 ShowSettings(false);
             }
-            else if (_clockEnabled) _clock?.Start();
+            else
+            {
+                if (!_settingsVisible) _overview.RenderPending();
+                if (_clockEnabled) _clock?.Start();
+            }
         };
 
         _window.Closing += (_, e) => { if (!IsDisposed) { e.Cancel = true; _window.Hide(); } };
@@ -101,12 +104,12 @@ internal sealed class WidgetForm : IDisposable
         };
         _window.Deactivated += (_, _) => _window.Dispatcher.BeginInvoke(() =>
         {
-            if (!IsDisposed && !_window.IsActive && !_dialogOpen && !_addMenu.IsOpen && !_rows.Values.Any(r => r.MenuOpen) && !_externalRows.Values.Any(r => r.MenuOpen))
+            if (!IsDisposed && !_window.IsActive && !_dialogOpen && !_addMenu.IsOpen && !_overview.PickerOpen && !_rows.Values.Any(r => r.MenuOpen) && !_externalRows.Values.Any(r => r.MenuOpen))
                 HideRequested?.Invoke(this, EventArgs.Empty);
         }, Threading.DispatcherPriority.Background);
         _window.PreviewKeyDown += async (_, e) =>
         {
-            if (e.Key == I.Key.Escape) { HideRequested?.Invoke(this, EventArgs.Empty); e.Handled = true; }
+            if (e.Key == I.Key.Escape) { if (_overview.PickerOpen) _overview.ClosePicker(); else HideRequested?.Invoke(this, EventArgs.Empty); e.Handled = true; }
             if (e.Key == I.Key.F5 && !_busy) { e.Handled = true; await RefreshAsync(); }
         };
         Click("RefreshButton", async () => await RefreshAsync());
@@ -144,7 +147,7 @@ internal sealed class WidgetForm : IDisposable
             });
         };
         _clock = new Threading.DispatcherTimer(TimeSpan.FromMinutes(1), Threading.DispatcherPriority.Background,
-            (_, _) => { if (Visible && !_busy) RefreshState(); }, _window.Dispatcher);
+            (_, _) => { if (Visible && !_busy) { RefreshState(); if (!_settingsVisible) _overview.RenderPending(); } }, _window.Dispatcher);
         _clock.Stop();
         ApplyTheme();
     }
@@ -157,7 +160,7 @@ internal sealed class WidgetForm : IDisposable
         if (message is 0x001E or 0x001A) BeginInvoke(() =>
         {
             TimeZoneInfo.ClearCachedData();
-            if (Visible) RefreshState();
+            if (Visible) { RefreshState(); if (!_settingsVisible) _overview.RenderPending(); }
         });
         if (message is 0x001A or 0x031A) BeginInvoke(() =>
         {
@@ -179,7 +182,7 @@ internal sealed class WidgetForm : IDisposable
         _window.Background = AcrylicEnabled ? M.Brushes.Transparent : UiTheme.Brush(_theme.Base);
         _theme.Apply(_window.Resources, AcrylicEnabled);
         foreach (var row in _rows.Values) row.SetTheme(_theme);
-        _historyPanel.SetTheme(_theme); _overview.SetTheme(_theme);
+        _overview.SetTheme(_theme, render: Visible && !_settingsVisible);
         foreach (var card in _externalRows.Values) card.SetTheme(_theme);
         _theme.Apply(_addMenu.Resources, false); _addMenu.Background = UiTheme.Brush(_theme.Base); _addMenu.Foreground = UiTheme.Brush(_theme.Text);
     }
@@ -285,7 +288,13 @@ internal sealed class WidgetForm : IDisposable
         }
         else banner.Visibility = W.Visibility.Collapsed;
     }
-    internal void ShowSettings(bool show) { _settingsVisible = show; if (show) UpdateOrderList(); UpdateViews(); }
+    internal void ShowSettings(bool show)
+    {
+        _settingsVisible = show;
+        if (show) { _overview.ClosePicker(); UpdateOrderList(); }
+        UpdateViews();
+        if (!show && Visible) _overview.RenderPending();
+    }
     private void UpdateFooter(DashboardState state)
     {
         var total = state.Profiles.Count + (state.OtherAccounts?.Count ?? 0);
@@ -419,8 +428,8 @@ internal sealed class WidgetForm : IDisposable
         try { return await _service.RefreshAllUsageAsync(null, _lifetime.Token); }
         finally { await history; }
     }, showDialogOnError: false);
-    private void UpdateHistoryPanels(TokenHistorySnapshot snapshot) { _historyPanel.Update(snapshot); _overview.Update(snapshot); }
-    internal void SetHistoryPreview(TokenHistorySnapshot snapshot) => UpdateHistoryPanels(snapshot);
+    private void UpdateHistoryPanels(TokenHistorySnapshot snapshot) => _overview.Update(snapshot, render: Visible && !_settingsVisible);
+    internal void SetHistoryPreview(TokenHistorySnapshot snapshot) => _overview.Update(snapshot);
     private async Task UpdateHistoryAsync()
     {
         if (_historyReading || IsDisposed) return;
@@ -534,7 +543,7 @@ internal sealed class WidgetForm : IDisposable
     public void Dispose()
     {
         if (IsDisposed) return;
-        IsDisposed = true; _addMenu.IsOpen = false; _addMenu.Items.Clear(); _lifetime.Cancel(); _historyTimer.Stop(); _clock.Stop(); _source?.RemoveHook(WindowMessage);
+        IsDisposed = true; _overview.ClosePicker(); _addMenu.IsOpen = false; _addMenu.Items.Clear(); _lifetime.Cancel(); _historyTimer.Stop(); _clock.Stop(); _source?.RemoveHook(WindowMessage);
         foreach (var card in _externalRows.Values) card.Dispose(); _externalRows.Clear();
         foreach (var row in _rows.Values) row.Dispose(); _rows.Clear(); _window.Close(); _lifetime.Dispose();
     }
@@ -694,7 +703,7 @@ internal sealed record UiTheme(bool Dark, bool Transparency, bool HighContrast, 
     {
         resources["Text"] = Brush(Text); resources["Muted"] = Brush(Muted); resources["Accent"] = Brush(Accent);
         resources["ToggleKnob"] = HighContrast ? W.SystemColors.HighlightTextBrush : Brush(Dark ? Base : M.Colors.White);
-        resources["ShellTint"] = Brush(Base, acrylic ? (byte)95 : (byte)255);
+        resources["ShellTint"] = acrylic && !HighContrast ? M.Brushes.Transparent : Brush(Base);
         resources["CardBg"] = Brush(Dark ? M.Colors.White : M.Colors.Black, (byte)10);
         resources["Line"] = Brush(Text, HighContrast ? (byte)255 : (byte)30);
         resources["Hover"] = Brush(Text, 18); resources["Selected"] = Brush(Accent, 28); resources["ScrollThumb"] = Brush(Text, 55);
@@ -730,11 +739,17 @@ internal static class WindowMaterial
 {
     [StructLayout(LayoutKind.Sequential)] private struct Margins { public int Left, Right, Top, Bottom; }
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr h, int attribute, ref int value, int size);
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr h, int attribute, out int value, int size);
     [DllImport("dwmapi.dll")] private static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref Margins margins);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr h);
     public static uint Dpi(IntPtr h) { try { return Math.Max(96, GetDpiForWindow(h)); } catch (EntryPointNotFoundException) { return 96; } }
     public static void Position(IntPtr h, int x, int y) => SetWindowPos(h, IntPtr.Zero, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+    internal static int? ReadBackdrop(IntPtr window)
+    {
+        try { return DwmGetWindowAttribute(window, 38, out var material, sizeof(int)) == 0 ? material : null; }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return null; }
+    }
     public static bool Apply(IntPtr h, bool dark, bool transparency)
     {
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return false;
@@ -746,10 +761,10 @@ internal static class WindowMaterial
             var borderColor = unchecked((int)0xFFFFFFFE); // DWMWA_COLOR_NONE
             DwmSetWindowAttribute(h, 34, ref borderColor, 4);
             if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621)) return false;
-            var backdrop = transparency ? 3 : 1;
+            var backdrop = transparency ? 3 : 1; // DWMSBT_TRANSIENTWINDOW / DWMSBT_NONE
             var ok = DwmSetWindowAttribute(h, 38, ref backdrop, 4) == 0;
             var margins = ok && transparency ? new Margins { Left = -1, Right = -1, Top = -1, Bottom = -1 } : new Margins();
-            if (DwmExtendFrameIntoClientArea(h, ref margins) == 0 && ok && transparency) return true;
+            if (DwmExtendFrameIntoClientArea(h, ref margins) == 0 && ok && transparency && ReadBackdrop(h) == 3) return true;
             backdrop = 1; DwmSetWindowAttribute(h, 38, ref backdrop, 4);
         }
         catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { }

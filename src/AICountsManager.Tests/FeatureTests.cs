@@ -84,19 +84,18 @@ internal static partial class Program
         using var form = new WidgetForm(service, new UiTheme(true, false, false), startClock: false);
         form.ApplyState(service.BuildDashboardState()); form.SetHistoryPreview(SampleHistory());
         form.Visual.Left = -20000; form.Visual.Top = -20000; form.Visual.Show(); form.Visual.UpdateLayout();
-        var stack = (System.Windows.Controls.StackPanel)form.Visual.FindName("DashboardStack");
-        var history = UiField<HistoryPanel>(form, "_historyPanel");
-        static T Field<T>(object owner, string name) => (T)owner.GetType().GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(owner)!;
+        var overview = UiField<ProviderOverview>(form, "_overview");
         static void Click(System.Windows.Controls.Button button) => button.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
-        Click(UiField<System.Windows.Controls.Button>(UiField<ProviderOverview>(form, "_overview"), "_week"));
-        var label = Field<System.Windows.Controls.TextBlock>(history, "_period"); var current = label.Text;
-        Click(Field<System.Windows.Controls.Button>(history, "_previous")); Check(label.Text != current, "History navigation did not move the calendar week.");
-        Click(Field<System.Windows.Controls.Button>(history, "_models"));
-        Check(Field<System.Windows.Controls.StackPanel>(history, "_details").Children.Count > 0, "Model details could not be opened.");
+        Click(UiField<System.Windows.Controls.Button>(overview, "_week"));
+        var current = overview.PeriodStart;
+        Click(MetricButton(overview, "previous"));
+        var selectedWeek = overview.PeriodStart;
+        Check(selectedWeek == current.AddDays(-7), "History navigation did not move the calendar week.");
         var refresh = (System.Windows.Controls.Button)form.Visual.FindName("RefreshButton"); Click(refresh);
         Check(!refresh.IsEnabled, "Refresh action did not lock duplicate UI clicks.");
         await EventuallyAsync(() => Task.FromResult(refresh.IsEnabled));
         Check(client.Calls == 3 && Repository(paths).LoadUsageCache().Accounts.Count == 3, "The visible refresh button did not update every account.");
+        Check(overview.PeriodStart == selectedWeek && overview.SelectedView == UsageView.Week, "Refresh lost the selected view or week.");
         var shell = (System.Windows.Controls.Border)form.Visual.FindName("Shell");
         var background = shell.Background;
         var windowBackground = form.Visual.Background;
@@ -198,7 +197,7 @@ internal static partial class Program
         await File.WriteAllTextAsync(file, Meta() + Tokens(100, 100, one) + Tokens(200, 100, two) + Tokens(300, 100, two.AddHours(4)));
         var result = await new TokenHistory(paths.CodexHome, cache, zone).RefreshAsync();
         Check(result.Days.Count == 2 && result.Days[0].Total == 100 && result.Days[1].Total == 200, "Local midnight/DST grouping failed.");
-        Check(HistoryPanel.Monday(new DateOnly(2026, 3, 29)) == new DateOnly(2026, 3, 23), "Calendar week does not start on Monday.");
+        Check(MetricsPeriods.Monday(new DateOnly(2026, 3, 29)) == new DateOnly(2026, 3, 23), "Calendar week does not start on Monday.");
     });
     private static Task PaceAndCountdownAsync()
     {

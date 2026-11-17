@@ -53,10 +53,10 @@ internal static partial class Program
                             typeof(AICountsManagerService).GetField("_nextBatchAllowed", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(service, DateTimeOffset.MinValue);
                             if (!form.Visible) tray.ToggleWidget();
                             form.Visual.Activate();
-                            var historyPanel = UiField<HistoryPanel>(form, "_historyPanel");
-                            if (i % 4 == 0) UiClick(UiField<C.Button>(historyPanel, "_models"));
+                            var overview = UiField<ProviderOverview>(form, "_overview");
+                            overview.Select((UsageView)(i % 4));
                             if (i % 2 == 0) button.Focus();
-                            else ((C.Button)UiField<C.Grid>(historyPanel, "_chart").Children[0]).Focus();
+                            else UiField<C.Button>(overview, "_week").Focus();
                             if (i % 2 == 0) UiClick(button);
                             else form.Visual.RaiseEvent(new I.KeyEventArgs(I.Keyboard.PrimaryDevice, W.PresentationSource.FromVisual(form.Visual)!, Environment.TickCount, I.Key.F5) { RoutedEvent = I.Keyboard.PreviewKeyDownEvent });
                             if (i % 3 == 0) { form.Hide(); await Task.Delay(10); tray.ToggleWidget(); }
