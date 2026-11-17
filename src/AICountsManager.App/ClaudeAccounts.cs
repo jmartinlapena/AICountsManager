@@ -28,6 +28,7 @@ internal sealed class ClaudeAccounts : IDisposable
     private ClaudeAccountState _state = new([]);
     private Dictionary<string, ProviderUsage> _readings = [];
     private ProviderUsage? _current;
+    private const string CurrentCacheKey = "@current:";
     private DateTimeOffset _providerNext;
     private volatile bool _enabled;
     private bool _disposed;
@@ -54,9 +55,16 @@ internal sealed class ClaudeAccounts : IDisposable
         try
         {
             if (File.Exists(_config)) _enabled = JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllBytes(_config))?.GetValueOrDefault(ProviderIds.Claude) == true;
-            if (File.Exists(_cache)) _readings = (JsonSerializer.Deserialize<Dictionary<string, ProviderUsage>>(ClaudeSessionArchive.ReadFile(_cache, 1024 * 1024)!) ?? [])
-                .Where(p => _state.Accounts.Any(a => a.Id == p.Key) && p.Value.Provider == ProviderIds.Claude)
-                .ToDictionary(p => p.Key, p => p.Value with { Status = "stale", Error = "Última lectura · pendiente de actualizar" });
+            if (File.Exists(_cache))
+            {
+                using var cache = JsonDocument.Parse(ClaudeSessionArchive.ReadFile(_cache, 1024 * 1024)!);
+                _readings = cache.RootElement.EnumerateObject().Select(p => KeyValuePair.Create(p.Name, ProviderUsage.ReadCache(p.Value)))
+                .Where(p => p.Value is not null)
+                .Where(p => (p.Key.StartsWith(CurrentCacheKey, StringComparison.Ordinal) || _state.Accounts.Any(a => a.Id == p.Key)) && p.Value!.Provider == ProviderIds.Claude)
+                .ToDictionary(p => p.Key, p => p.Value! with { Status = "stale", Error = "Última lectura · pendiente de actualizar", Resets = p.Value!.Resets?.Stale() });
+            }
+            if (_enabled && _archive.LiveSource.Read() is { } session
+                && _readings.GetValueOrDefault(CurrentCacheKey + session.Fingerprint) is { } current) _current = current;
         }
         catch (Exception ex) when (ex is IOException or JsonException) { _log("No se pudo leer la caché de Claude.", ex); }
         if (_enabled) StartWatchers();
@@ -70,7 +78,7 @@ internal sealed class ClaudeAccounts : IDisposable
             var state = _state; var readings = _readings;
             var rows = state.Accounts.Select(a => (readings.GetValueOrDefault(a.Id) ?? ProviderUsage.Unavailable(ProviderIds.Claude, "Pendiente de actualizar"))
                 with { Name = a.Name, Email = a.Email, Plan = readings.GetValueOrDefault(a.Id)?.Plan ?? a.Plan, Identity = a.Identity, ProfileId = a.Id, IsActive = state.Pending is null && state.ActiveId == a.Id }).ToList();
-            if (_current is { } current && !state.Accounts.Any(a => a.Identity == current.Identity) && current.Status == "ok") rows.Add(current);
+            if (_current is { } current && !state.Accounts.Any(a => a.Identity == current.Identity) && current.Status is "ok" or "stale") rows.Add(current);
             if (rows.Count == 0 && state.Pending is null) rows.Add(_current ?? ProviderUsage.Unavailable(ProviderIds.Claude, "Inicia sesión en Claude Desktop o Claude Code y actualiza."));
             return rows;
         }
@@ -87,9 +95,11 @@ internal sealed class ClaudeAccounts : IDisposable
     }
     private void SaveUsage(string id, ProviderUsage usage)
     {
-        if (usage.Status != "ok" && _readings.TryGetValue(id, out var previous))
-            usage = usage with { Quotas = previous.Quotas, CheckedAt = previous.CheckedAt,
-                Plan = previous.Plan, Status = "stale" };
+        if (_readings.TryGetValue(id, out var previous))
+            usage = usage.Status != "ok"
+                ? previous with { Error = usage.Error, HttpStatus = usage.HttpStatus, RetryAfterSeconds = usage.RetryAfterSeconds,
+                    Status = "stale", Resets = previous.Resets?.Stale() }
+                : usage with { Resets = ResetInventory.Merge(usage.Resets, previous.Resets) };
         var next = new Dictionary<string, ProviderUsage>(_readings) { [id] = usage };
         AtomicFile.WriteText(_cache, JsonSerializer.Serialize(next)); _readings = next;
     }
@@ -252,7 +262,20 @@ internal sealed class ClaudeAccounts : IDisposable
             var live = _archive.LiveSource;
             if (DateTimeOffset.UtcNow >= _next.GetValueOrDefault("current"))
             {
-                _current = await QueryAsync(live, token).ConfigureAwait(false);
+                var sessionKey = live.Read()?.Fingerprint;
+                var reading = await QueryAsync(live, token).ConfigureAwait(false);
+                var sameSession = sessionKey is not null && sessionKey == live.Read()?.Fingerprint;
+                if (reading.Status == "error" && sameSession && _readings.GetValueOrDefault(CurrentCacheKey + sessionKey) is { } previous)
+                    reading = previous with { Status = "stale", Error = reading.Error, HttpStatus = reading.HttpStatus,
+                        RetryAfterSeconds = reading.RetryAfterSeconds, Resets = previous.Resets?.Stale() };
+                if (reading.Identity is not null && reading.Identity == _current?.Identity)
+                    reading = reading with { Resets = ResetInventory.Merge(reading.Resets, _current.Resets) };
+                _current = reading;
+                // Persist the unregistered live account too, without introducing another cache or credentials.
+                var nextReadings = new Dictionary<string, ProviderUsage>(_readings);
+                foreach (var key in nextReadings.Keys.Where(k => k.StartsWith(CurrentCacheKey, StringComparison.Ordinal)).ToArray()) nextReadings.Remove(key);
+                if (reading.Status is "ok" or "stale" && sameSession) nextReadings[CurrentCacheKey + sessionKey] = reading;
+                AtomicFile.WriteText(_cache, JsonSerializer.Serialize(nextReadings)); _readings = nextReadings;
                 _next["current"] = DateTimeOffset.UtcNow.AddSeconds(_current.HttpStatus == 429 ? Math.Max(60, _current.RetryAfterSeconds ?? 60) : 15);
                 if (_state.Accounts.FirstOrDefault(a => a.Identity == _current.Identity) is { } active)
                 {
@@ -281,7 +304,7 @@ internal sealed class ClaudeAccounts : IDisposable
                         reading = await QueryAsync(new FixedClientSession(_archive.Session(bundle, account.Account, account.Organization)), token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-                    catch (Exception) { reading = ProviderUsage.Unavailable(ProviderIds.Claude, "No se pudo consultar la sesión guardada de Claude."); }
+                    catch (Exception ex) { reading = ProviderUsage.Unavailable(ProviderIds.Claude, QuotaFailure.FromException(ex)); }
                     SaveUsage(account.Id, reading);
                     _next[account.Id] = DateTimeOffset.UtcNow.AddSeconds(reading.HttpStatus == 429 ? Math.Max(60, reading.RetryAfterSeconds ?? 60) : 15);
                     if (reading.HttpStatus == 429) { _providerNext = _next[account.Id]; break; }
@@ -294,7 +317,7 @@ internal sealed class ClaudeAccounts : IDisposable
     {
         try { return await QuotaQuery.ReadAsync(new ClaudeQuotaProvider(source, _http), new CurrentQuotaRequest(), token).ConfigureAwait(false); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (Exception) { return ProviderUsage.Unavailable(ProviderIds.Claude, "No se pudo consultar Claude. Vuelve a actualizar."); }
+        catch (Exception ex) { return ProviderUsage.Unavailable(ProviderIds.Claude, QuotaFailure.FromException(ex)); }
     }
     private void StartWatchers()
     {

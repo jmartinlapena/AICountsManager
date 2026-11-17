@@ -8,7 +8,7 @@ La aplicación está hecha en C#: WinForms gestiona la bandeja del sistema y WPF
 
 ## Instalar sin compilar
 
-Usa `AICountsManager-3.2.1-win-x64-Setup.exe` en equipos Intel/AMD, o `win-arm64` en Windows ARM. Se instala para tu usuario, crea el acceso directo y permite desinstalar desde Configuración de Windows. No necesita administrador, SDK, Python ni instalar .NET: el runtime .NET 10 LTS viene incluido.
+Usa `AICountsManager-3.4.0-win-x64-Setup.exe` en equipos Intel/AMD, o `win-arm64` en Windows ARM. Se instala para tu usuario, crea el acceso directo y permite desinstalar desde Configuración de Windows. No necesita administrador, SDK, Python ni instalar .NET: el runtime .NET 10 LTS viene incluido.
 
 También se genera un `Portable.zip`: descomprime **todo** el ZIP y ejecuta `AICountsManager.exe`. No copies solo el EXE. Requiere Windows 10 2004 (19041) o posterior / Windows 11; no funciona en macOS o Linux.
 
@@ -27,6 +27,14 @@ Para Codex se requiere su instalación y autenticación en archivo (`cli_auth_cr
 ## Mantenimiento interno (3.2.1)
 
 La gestión de cuentas utiliza un contrato común y capacidades explícitas, con autenticación específica de cada proveedor. El arranque es asíncrono, el almacenamiento cifrado es compartido y los grupos de pruebas se seleccionan por identidad. La interfaz, las rutas y los formatos de datos se conservan; no hay migración ni nuevos temporizadores. [Diseño de los componentes](docs/ARCHITECTURE.md) · [Validación](docs/VALIDATION-3.2.1.md).
+
+## Resets disponibles y avisos (3.4.0)
+
+- Las cuentas de Codex y Claude muestran sus resets acumulados entre la identidad y las cuotas. La fila se oculta si no hay ninguno; al desplegarla aparecen el tipo, los límites afectados y la caducidad en la zona horaria actual de Windows.
+- Si el próximo reset conocido caduca dentro de siete días o menos, la fila plegada muestra «Caduca pronto» y el tiempo restante en amarillo. Las caducidades posteriores no generan ese aviso.
+- Actualizar/F5 consulta también los resets de todas las cuentas guardadas, conservando los límites de concurrencia y las pausas del proveedor. No activa cuentas ni abre clientes.
+- Los avisos de una sola línea diferencian conexión, autenticación, servicio y tiempo de espera. Un fallo conserva la última lectura de cuotas y resets, también en una sesión de Claude todavía no registrada.
+- Se reutilizan las cachés, el ciclo de consulta y el reloj visible existentes. No se añaden temporizadores, sondeos de conectividad ni procesos auxiliares. [Implementación y pruebas](docs/available-resets.md).
 
 ## Requisitos de desarrollo
 
@@ -211,7 +219,7 @@ pwsh ./scripts/build_release.ps1
 pwsh ./scripts/build_release.ps1 -Dotnet C:/herramientas/dotnet.exe -Iscc 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe'
 ```
 
-Ejecuta las pruebas y genera ambas arquitecturas en `artifacts/releases/3.1.0/`: instaladores, ZIP portables, manifiestos y `SHA256SUMS.txt`. Comprueba versión de DLL, arquitectura del EXE y dependencias autocontenidas. En la arquitectura del equipo ejecuta `--self-test`: carga WPF, icono y SQLite sin abrir perfiles ni iniciar la bandeja. No modifica la instalación en ejecución. Para repetir una versión, retira primero su carpeta de salida o incrementa la versión.
+Ejecuta las pruebas y genera ambas arquitecturas en `artifacts/releases/3.4.0/`: instaladores, ZIP portables, manifiestos y `SHA256SUMS.txt`. Comprueba versión de DLL, arquitectura del EXE y dependencias autocontenidas. En la arquitectura del equipo ejecuta `--self-test`: carga WPF, icono y SQLite sin abrir perfiles ni iniciar la bandeja. No modifica la instalación en ejecución. Para repetir una versión, retira primero su carpeta de salida o incrementa la versión.
 
 `-SigningThumbprint` y `-SignTool` permiten firmar aplicación e instalador con un certificado de publicación. Sin ellos, el manifiesto registra `Signed: false`. El proceso ya no depende del hash de un EXE aceptado en un ordenador concreto.
 

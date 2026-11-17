@@ -154,6 +154,11 @@ internal sealed class WidgetForm : IDisposable
     public void Activate() => _window.Activate();
     private IntPtr WindowMessage(IntPtr h, int message, IntPtr w, IntPtr l, ref bool handled)
     {
+        if (message is 0x001E or 0x001A) BeginInvoke(() =>
+        {
+            TimeZoneInfo.ClearCachedData();
+            if (Visible) RefreshState();
+        });
         if (message is 0x001A or 0x031A) BeginInvoke(() =>
         {
             var next = _fixedTheme ?? UiTheme.Read();
@@ -222,6 +227,7 @@ internal sealed class WidgetForm : IDisposable
                 {
                     row = new AccountRow(_theme);
                     row.ActivateRequested += SwitchAsync; row.RenameRequested += RenameAsync; row.DeleteRequested += DeleteAsync;
+                    row.HeightChanged += () => { if (Visible) UpdateWindowHeight(); };
                     _rows.Add(profile.Name, row);
                 }
                 row.Update(profile, _busy);
@@ -240,6 +246,7 @@ internal sealed class WidgetForm : IDisposable
                 {
                     card = new CurrentProviderCard(_theme);
                     card.ActivateRequested += ClaudeSwitchAsync; card.RenameRequested += ClaudeRenameAsync; card.DeleteRequested += ClaudeDeleteAsync;
+                    card.HeightChanged += () => { if (Visible) UpdateWindowHeight(); };
                     _externalRows[key] = card;
                 }
                 card.Update(other); card.SetBusy(_busy);
@@ -541,7 +548,9 @@ internal sealed class AccountRow : C.Border, IDisposable
     private readonly C.TextBlock _plan = Text(9.5, true);
     private readonly C.Border _planBadge = new() { CornerRadius = new W.CornerRadius(4), Padding = new W.Thickness(5, 2, 5, 2), Margin = new W.Thickness(6, 0, 0, 0), VerticalAlignment = W.VerticalAlignment.Center };
     private readonly C.StackPanel[] _quotaSections = [new(), new()];
-    internal double EstimatedHeight => _profile?.SessionLimitNotApplicable == true ? 122 : 174;
+    private readonly AvailableResetsView _resets = new();
+    public event Action? HeightChanged;
+    internal double EstimatedHeight => (_profile?.SessionLimitNotApplicable == true ? 122 : 174) + _resets.EstimatedHeight;
     private readonly C.TextBlock _name = Text(13, true), _email = Text(10), _badge = Text(10, true), _updated = Text(9.5), _notice = Text(10);
     private readonly C.Button _activate = new() { Content = "Activar", FontSize = 10, Padding = new W.Thickness(9, 3, 9, 3), MinHeight = 24 }, _more = new() { Content = "\uE712", FontFamily = new M.FontFamily("Segoe Fluent Icons"), Width = 24, MinHeight = 24, Padding = new W.Thickness(0) };
     private readonly C.ContextMenu _menu = new();
@@ -572,6 +581,7 @@ internal sealed class AccountRow : C.Border, IDisposable
         var status = new C.StackPanel { Margin = new W.Thickness(6, 0, 9, 0), VerticalAlignment = W.VerticalAlignment.Center };
         _badge.HorizontalAlignment = _updated.HorizontalAlignment = W.HorizontalAlignment.Right; status.Children.Add(_badge); status.Children.Add(_updated); status.Children.Add(_activate);
         C.Grid.SetColumn(status, 1); header.Children.Add(status); C.Grid.SetColumn(_more, 2); header.Children.Add(_more); stack.Children.Add(header);
+        stack.Children.Add(_resets); _resets.HeightChanged += () => HeightChanged?.Invoke();
         _activate.Click += async (_, _) => { if (_profile is { } p && ActivateRequested is { } action) await action(p.Name); };
         _more.Click += (_, _) => { _menu.PlacementTarget = _more; _menu.IsOpen = true; };
         W.Automation.AutomationProperties.SetName(_more, "Opciones de la cuenta");
@@ -613,6 +623,7 @@ internal sealed class AccountRow : C.Border, IDisposable
     public void Update(ProfileState p, bool busy)
     {
         _profile = p; W.Automation.AutomationProperties.SetName(this, "Cuenta " + p.Name);
+        _resets.Update(p.Resets, _theme);
         _plan.Text = AccountPlan.Label(p.PlanType) ?? "";
         _planBadge.Visibility = _plan.Text.Length == 0 ? W.Visibility.Collapsed : W.Visibility.Visible;
         _plan.Foreground = UiTheme.Brush(_theme.Accent);
@@ -628,7 +639,7 @@ internal sealed class AccountRow : C.Border, IDisposable
         BorderBrush = UiTheme.Brush(p.IsActive ? _theme.Accent : _theme.Text, p.IsActive ? (byte)35 : (byte)0);
         for (var i = 0; i < 2; i++) SetFill(i);
         _notice.Visibility = p.Status is "error" or "stale" ? W.Visibility.Visible : W.Visibility.Collapsed;
-        _notice.Text = p.Status == "error" ? "No se pudo actualizar · " + p.Error : "Datos antiguos · " + p.UpdatedLabel;
+        _notice.Text = p.Status == "error" ? p.Error ?? QuotaFailure.Unknown : "Datos antiguos · " + p.UpdatedLabel;
         SetBusy(busy);
     }
     private void SetFill(int index)
@@ -656,6 +667,7 @@ internal sealed class AccountRow : C.Border, IDisposable
         if (IsDisposed) return;
         IsDisposed = true; _menu.IsOpen = false; _menu.Items.Clear(); _menu.PlacementTarget = null;
         ActivateRequested = RenameRequested = DeleteRequested = null; Child = null;
+        HeightChanged = null;
     }
 }
 

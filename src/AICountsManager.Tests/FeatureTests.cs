@@ -219,7 +219,10 @@ internal static partial class Program
         public int Calls, Running, Maximum;
         public async Task<UsageRecord> ReadAsync(AuthSnapshot snapshot, string path, CancellationToken token)
         {
-            Interlocked.Increment(ref Calls); var running = Interlocked.Increment(ref Running); Maximum = Math.Max(Maximum, running);
+            Interlocked.Increment(ref Calls); var running = Interlocked.Increment(ref Running);
+            int observed;
+            do { observed = Volatile.Read(ref Maximum); if (observed >= running) break; }
+            while (Interlocked.CompareExchange(ref Maximum, running, observed) != observed);
             try { return await read(snapshot, token); } finally { Interlocked.Decrement(ref Running); }
         }
     }
@@ -227,14 +230,22 @@ internal static partial class Program
     {
         var accounts = Enumerable.Range(0, 5).Select(i => (Name: "Account" + i, Snapshot: Snapshot("u" + i, "a" + i, "w" + i, "g", 1700000000))).ToArray();
         SeedProfiles(paths, accounts[0].Snapshot, accounts);
-        var client = new BatchUsageClient(async (snapshot, token) => { await Task.Delay(30, token); return snapshot.AccountId == "a2" ? UsageRecord.FromError("Synthetic rejected token") : FakeUsageClient.Result(); });
+        var firstPair = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = 0;
+        var client = new BatchUsageClient(async (snapshot, token) =>
+        {
+            if (Interlocked.Increment(ref entered) == 2) firstPair.TrySetResult();
+            await firstPair.Task.WaitAsync(token);
+            return snapshot.AccountId == "a2" ? UsageRecord.FromError("Synthetic rejected token") : FakeUsageClient.Result();
+        });
         var process = new FakeProcessController(true);
         using var service = new AICountsManagerService(paths, process, new FakeAppServerClient(), client, false);
         var repo = Repository(paths); repo.SaveUsage("Account2", FakeUsageClient.Result());
         var authPaths = accounts.Select(a => repo.GetProfileAuthPath(a.Name)).Append(paths.ActiveAuthPath).ToArray();
         var hashes = authPaths.Select(p => AuthHash.Bytes(File.ReadAllBytes(p))).ToArray();
         var result = await service.RefreshAllUsageAsync();
-        Check(result.StartsWith("4/5") && client.Calls == 5 && client.Maximum == 2, "Bulk did not update all accounts with bounded concurrency.");
+        Check(result.StartsWith("4/5") && client.Calls == 5 && client.Maximum == 2,
+            $"Bulk did not update all accounts with bounded concurrency: calls={client.Calls}, maximum={client.Maximum}, result={result}");
         Check(repo.LoadUsageCache().Accounts.Count == 5 && repo.LoadUsageCache().Accounts["Account2"].Session.UsedPercent == 10, "Cache results were lost on concurrent queries/failure.");
         Check(authPaths.Select(p => AuthHash.Bytes(File.ReadAllBytes(p))).SequenceEqual(hashes), "Bulk changed credentials.");
         Check(repo.LoadAppConfig().ActiveProfile == "Account0" && process.CloseCalls == 0 && process.RestartCalls == 0, "Bulk switched an account or touched Codex processes.");

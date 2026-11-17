@@ -17,9 +17,19 @@ internal sealed record ProviderQuota(string Id, string Group, string Label, doub
 }
 internal sealed record ProviderUsage(string Provider, string? Identity, string Name, string? Email, string? Plan,
     string? CheckedAt, string Status, string? Error, IReadOnlyList<ProviderQuota> Quotas,
-    int? HttpStatus = null, int? RetryAfterSeconds = null, bool SessionLimitNotApplicable = false, string? ProfileId = null, bool IsActive = false)
+    int? HttpStatus = null, int? RetryAfterSeconds = null, bool SessionLimitNotApplicable = false, string? ProfileId = null, bool IsActive = false,
+    ResetInventory? Resets = null)
 {
     public static ProviderUsage Unavailable(string provider, string error) => new(provider, null, ProviderIds.Name(provider), null, null, null, "error", error, []);
+    public static ProviderUsage? ReadCache(JsonElement root)
+    {
+        // Optional reset metadata must not invalidate otherwise readable legacy quota data.
+        var node = System.Text.Json.Nodes.JsonNode.Parse(root.GetRawText()) as System.Text.Json.Nodes.JsonObject;
+        if (node is null) return null;
+        var resets = node["Resets"]; node.Remove("Resets");
+        var usage = node.Deserialize<ProviderUsage>();
+        return usage is null ? null : usage with { Resets = resets is null ? null : ResetInventory.ReadCache(JsonSerializer.SerializeToElement(resets)) };
+    }
     public bool Fresh => Status == "ok" && DateTimeOffset.TryParse(CheckedAt, out var t) && DateTimeOffset.UtcNow - t < TimeSpan.FromMinutes(15);
     // Independent account capacities cannot be added. This scalar is explicitly the most-used weekly limit.
     public double? WeeklyUsed => Fresh ? Quotas.Where(q => q.Minutes == 10080).Select(q => q.CurrentUsed).Where(v => v.HasValue).DefaultIfEmpty(null).Max() : null;
@@ -40,7 +50,13 @@ internal static class QuotaQuery
             throw new InvalidOperationException("Solicitud incompatible con el adaptador de cuotas.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(12));
-        return await provider.ReadAsync(request, deadline.Token).ConfigureAwait(false);
+        try { return await provider.ReadAsync(request, deadline.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception ex) when (ex is HttpRequestException or System.Net.Sockets.SocketException or HttpIOException or OperationCanceledException or TimeoutException)
+        {
+            return ProviderUsage.Unavailable(provider.Id, QuotaFailure.FromException(ex)) with
+            { HttpStatus = ex is HttpRequestException { StatusCode: { } status } ? (int)status : null };
+        }
     }
 }
 internal sealed class CodexQuotaProvider(IUsageClient client) : IQuotaProvider
@@ -54,19 +70,20 @@ internal sealed class CodexQuotaProvider(IUsageClient client) : IQuotaProvider
         return new(Id, codex.Auth.Identity.Fingerprint, "Codex", u.Email, u.PlanType, u.CheckedAt, u.Status, u.Error,
             [new("session", "Codex", "Sesión · 5 h", u.Session.UsedPercent, u.Session.WindowDurationMins, u.Session.ResetsAt),
              new("weekly", "Codex", "Semanal", u.Weekly.UsedPercent, u.Weekly.WindowDurationMins, u.Weekly.ResetsAt)],
-            u.HttpStatus, u.RetryAfterSeconds, u.SessionLimitNotApplicable);
+            u.HttpStatus, u.RetryAfterSeconds, u.SessionLimitNotApplicable, Resets: u.Resets);
     }
     public static UsageRecord Legacy(ProviderUsage reading) => new()
     {
         CheckedAt = reading.CheckedAt, Status = reading.Status, Error = reading.Error, Email = reading.Email,
         PlanType = reading.Plan, HttpStatus = reading.HttpStatus, RetryAfterSeconds = reading.RetryAfterSeconds,
         SessionLimitNotApplicable = reading.SessionLimitNotApplicable,
+        Resets = reading.Resets,
         Session = reading.Quotas.FirstOrDefault(q => q.Id == "session")?.Window ?? new(null, null, null),
         Weekly = reading.Quotas.FirstOrDefault(q => q.Id == "weekly")?.Window ?? new(null, null, null)
     };
     public static ProviderUsage FromProfile(ProfileState p) => new(ProviderIds.Codex, p.Name, p.Name, p.Email,
         AccountPlan.Label(p.PlanType), p.Status == "ok" ? DateTimeOffset.UtcNow.ToString("O") : null, p.Status, p.Error,
-        [new("weekly", "Codex", "Semanal", p.WeeklyUsedPercent, 10080, p.WeeklyWindow?.ResetsAt)]);
+        [new("weekly", "Codex", "Semanal", p.WeeklyUsedPercent, 10080, p.WeeklyWindow?.ResetsAt)], Resets: p.Resets);
 }
 
 // Only numeric snapshots and account display metadata are persisted, never authentication material.
@@ -94,7 +111,8 @@ internal sealed class CurrentProviderStore
             if (File.Exists(_config)) _enabled = provider is not null && (JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllText(_config))?.GetValueOrDefault(Id, provider.DefaultEnabled) ?? provider.DefaultEnabled);
             if (provider is not null && File.Exists(_cache) && new FileInfo(_cache).Length <= 128 * 1024)
             {
-                var saved = JsonSerializer.Deserialize<ProviderUsage>(File.ReadAllText(_cache));
+                using var document = JsonDocument.Parse(File.ReadAllText(_cache));
+                var saved = ProviderUsage.ReadCache(document.RootElement);
                 if (saved is { Quotas.Count: <= 24 } && saved.Provider == Id && saved.Quotas.All(q => q is not null))
                     _snapshot = saved with { Status = "stale", Error = "Última lectura · comprobando sesión actual" };
             }
@@ -119,12 +137,14 @@ internal sealed class CurrentProviderStore
             ProviderUsage result;
             try { result = await QuotaQuery.ReadAsync(_provider, new CurrentQuotaRequest(), token).ConfigureAwait(false); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception) { result = ProviderUsage.Unavailable(_provider.Id, "No se pudo consultar " + ProviderIds.Name(Id) + ". Vuelve a actualizar."); }
+            catch (Exception ex) { result = ProviderUsage.Unavailable(_provider.Id, QuotaFailure.FromException(ex)); }
             token.ThrowIfCancellationRequested();
             if (!_enabled || generation != Volatile.Read(ref _generation)) return;
             // Keep an unavailable previous observation explicitly stale. Never merge limits from two identities.
             if (result.Status == "error" && _snapshot is { } previous && (result.Identity is null || result.Identity == previous.Identity))
-                result = previous with { Status = "error", Error = "Última cuenta consultada · " + result.Error, HttpStatus = result.HttpStatus, RetryAfterSeconds = result.RetryAfterSeconds };
+                result = previous with { Status = "error", Error = result.Error, HttpStatus = result.HttpStatus, RetryAfterSeconds = result.RetryAfterSeconds, Resets = previous.Resets?.Stale() };
+            else if (result.Status == "ok" && _snapshot is { } last && result.Identity is not null && result.Identity == last.Identity)
+                result = result with { Resets = ResetInventory.Merge(result.Resets, last.Resets) };
             _snapshot = result;
             _next = DateTimeOffset.UtcNow.AddSeconds(result.HttpStatus == 429 ? Math.Clamp(result.RetryAfterSeconds ?? 60, 60, 86400) : 15);
             AtomicFile.WriteText(_cache, JsonSerializer.Serialize(result));

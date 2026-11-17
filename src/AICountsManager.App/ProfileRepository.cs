@@ -340,9 +340,12 @@ internal sealed class ProfileRepository
                     CheckedAt = ReadString(usage, "CheckedAt", "checked_at"),
                     Status = ReadString(usage, "Status", "status") ?? "never_checked",
                     Error = ReadString(usage, "Error", "error"),
+                    HttpStatus = (usage["HttpStatus"] ?? usage["http_status"]) is JsonValue status && status.TryGetValue<int>(out var code) ? code : null,
+                    RetryAfterSeconds = (usage["RetryAfterSeconds"] ?? usage["retry_after_seconds"]) is JsonValue retry && retry.TryGetValue<int>(out var seconds) ? seconds : null,
                     Email = ReadString(usage, "Email", "email")
                         ?? usage["account"]?["email"]?.GetValue<string?>(),
                     PlanType = ReadString(usage, "PlanType", "plan_type"),
+                    Resets = usage["Resets"] is { } resets ? ResetInventory.ReadCache(System.Text.Json.JsonSerializer.SerializeToElement(resets)) : null,
                     SessionLimitNotApplicable = ReadBool(usage, "SessionLimitNotApplicable", "session_limit_not_applicable") ?? false,
                     Session = ReadUsageWindow(usage["Session"] ?? usage["session"] ?? usage["rateLimits"]?["primary"]),
                     Weekly = ReadUsageWindow(usage["Weekly"] ?? usage["weekly"] ?? usage["rateLimits"]?["secondary"]),
@@ -360,8 +363,10 @@ internal sealed class ProfileRepository
     {
         var cache = LoadUsageCache();
         profileName = SanitizeProfileName(profileName);
-        if (usage.Status == "error" && cache.Accounts.TryGetValue(profileName, out var previous))
-            usage = previous with { Status = "error", Error = usage.Error };
+        if (cache.Accounts.TryGetValue(profileName, out var previous))
+            usage = usage.Status == "error"
+                ? previous with { Status = "error", Error = usage.Error, HttpStatus = usage.HttpStatus, RetryAfterSeconds = usage.RetryAfterSeconds, Resets = previous.Resets?.Stale() }
+                : usage with { Resets = ResetInventory.Merge(usage.Resets, previous.Resets) };
         cache.Accounts[profileName] = usage;
         SaveUsageCache(cache);
     }

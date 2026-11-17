@@ -130,12 +130,14 @@ internal sealed class CurrentProviderCard : C.Border, IDisposable
     private ProviderUsage? _account;
     private readonly C.ContextMenu _menu = new();
     private readonly List<C.Button> _actions = [];
-    internal double EstimatedHeight => _account is null ? 130 : 74 + _account.Quotas.GroupBy(q => q.Group).Count() * 24 + _account.Quotas.Count * 46;
+    private readonly AvailableResetsView _resets = new();
+    public event Action? HeightChanged;
+    internal double EstimatedHeight => (_account is null ? 130 : 74 + _account.Quotas.GroupBy(q => q.Group).Count() * 24 + _account.Quotas.Count * 46) + _resets.EstimatedHeight;
     public event Func<string, Task>? ActivateRequested, RenameRequested, DeleteRequested;
     public bool MenuOpen => _menu.IsOpen;
     public void SetBusy(bool busy) { foreach (var action in _actions) action.IsEnabled = !busy; if (busy) _menu.IsOpen = false; }
-    public void Dispose() { _menu.IsOpen = false; _menu.Items.Clear(); _menu.PlacementTarget = null; ActivateRequested = RenameRequested = DeleteRequested = null; Child = null; }
-    public CurrentProviderCard(UiTheme theme) { _theme = theme; CornerRadius = new(11); Padding = new(12, 10, 12, 11); Margin = new(0, 0, 0, 8); BorderThickness = new(1); BorderBrush = M.Brushes.Transparent; }
+    public void Dispose() { _menu.IsOpen = false; _menu.Items.Clear(); _menu.PlacementTarget = null; ActivateRequested = RenameRequested = DeleteRequested = null; HeightChanged = null; Child = null; }
+    public CurrentProviderCard(UiTheme theme) { _theme = theme; CornerRadius = new(11); Padding = new(12, 10, 12, 11); Margin = new(0, 0, 0, 8); BorderThickness = new(1); BorderBrush = M.Brushes.Transparent; _resets.HeightChanged += () => HeightChanged?.Invoke(); }
     public void SetTheme(UiTheme theme) { _theme = theme; if (_account is not null) Update(_account); }
     public void Update(ProviderUsage account)
     {
@@ -193,6 +195,9 @@ internal sealed class CurrentProviderCard : C.Border, IDisposable
         identity.Children.Add(new C.TextBlock { Text = account.Email ?? fallback, FontSize = 10,
             Margin = new(0, 2, 0, 0), Foreground = UiTheme.Brush(_theme.Muted), TextTrimming = W.TextTrimming.CharacterEllipsis });
         header.Children.Add(identity); stack.Children.Add(header);
+        if (_resets.Parent is C.Panel previousParent) previousParent.Children.Remove(_resets);
+        _resets.Update(account.Resets, _theme);
+        if (account.Resets is not null) stack.Children.Add(_resets);
         var groupIndex = 0;
         foreach (var group in account.Quotas.GroupBy(q => q.Group))
         {
@@ -237,6 +242,6 @@ internal sealed class CurrentProviderCard : C.Border, IDisposable
             }
         }
         if (!account.Fresh || account.Error is not null)
-            stack.Children.Add(new C.TextBlock { Text = account.Error ?? "Última lectura · pendiente de actualizar", FontSize = 10, TextWrapping = W.TextWrapping.Wrap, Foreground = UiTheme.Brush(_theme.Warning), Margin = new(0, 7, 0, 0) });
+            stack.Children.Add(new C.TextBlock { Text = account.Error ?? "Última lectura · pendiente de actualizar", FontSize = 10, TextTrimming = W.TextTrimming.CharacterEllipsis, Foreground = UiTheme.Brush(_theme.Warning), Margin = new(0, 7, 0, 0) });
     }
 }

@@ -9,6 +9,16 @@ internal static partial class Program
 {
     private static readonly (string Name, Func<Task> Run)[] Tests =
     [
+        ("quota feedback hides empty inventories and highlights only expirations within seven days", QuotaFeedbackExpiryAsync),
+        ("quota feedback distinguishes transport, authentication, service and cancellation across providers", QuotaFeedbackTransportAsync),
+        ("quota feedback preserves cached quotas and resets during connection failures", QuotaFeedbackCacheAsync),
+        ("quota feedback reuses the existing single-line account notices", QuotaFeedbackNoticeAsync),
+        ("available resets parse quantities, scopes, expirations and provider inventories", AvailableResetParsingAsync),
+        ("available reset queries preserve quotas, cancellation and provider backoff", AvailableResetTransportAsync),
+        ("available reset caches preserve account isolation and legacy quotas", AvailableResetCacheAsync),
+        ("available reset Retry-After stops and throttles account batches", AvailableResetBackoffAsync),
+        ("available resets update every saved Codex and Claude account without switching", AvailableResetBulkAsync),
+        ("available reset disclosure is shared, stable and uses current local time", AvailableResetUiAsync),
         ("Claude and Cursor quotas preserve provider units and reset periods", ClientQuotaParsingAsync),
         ("Claude OAuth and Cursor Connect/REST use current read-only session", ClientQuotaTransportAsync),
         ("client credentials and SQLite state remain unmodified", ClientCredentialReadOnlyAsync),
@@ -121,6 +131,15 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args is ["--quota-feedback-tests"])
+        {
+            try { foreach (var t in Tests.Where(t => t.Name.StartsWith("quota feedback", StringComparison.Ordinal))) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+            catch (Exception ex) { Console.Error.WriteLine("FAIL " + ex.Message); return 1; }
+        }
+        if (args is ["--render-quota-feedback", var feedbackOutput]) { await RenderQuotaFeedbackAsync(feedbackOutput); return 0; }
+        if (args is ["--available-reset-tests"]) { foreach (var t in Tests.Where(t => t.Name.StartsWith("available reset", StringComparison.Ordinal))) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
+        if (args is ["--render-available-resets", var resetOutput]) { await RenderAvailableResetsAsync(resetOutput); return 0; }
+        if (args is ["--measure-available-resets", var resetMeasurement]) { await MeasureAvailableResetsAsync(resetMeasurement); return 0; }
         if (args is ["--probe-organization-copies", var codexCopyHome, var claudeCopyHome, var orgReport]) { await ProbeOrganizationCopiesAsync(codexCopyHome, claudeCopyHome, orgReport); return 0; }
         if (args is ["--architecture-tests"]) { foreach (var t in SelectTestGroup("architecture")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }
         if (args is ["--organization-tests"]) { foreach (var t in SelectTestGroup("organization")) { await t.Run(); Console.WriteLine("PASS " + t.Name); } return 0; }

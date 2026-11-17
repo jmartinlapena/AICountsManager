@@ -8,14 +8,16 @@ internal interface IUsageClient
     Task<UsageRecord> ReadAsync(AuthSnapshot snapshot, string codexConfigPath, CancellationToken cancellationToken);
 }
 
-internal sealed class UsageClient : IUsageClient
+internal sealed class UsageClient(HttpClient? http = null) : IUsageClient
 {
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
+    private static readonly HttpClient Http = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(15) };
+    private readonly HttpClient _http = http ?? Http;
     public async Task<UsageRecord> ReadAsync(
         AuthSnapshot snapshot,
         string codexConfigPath,
         CancellationToken cancellationToken)
     {
+        var started = System.Diagnostics.Stopwatch.StartNew();
         if (string.IsNullOrWhiteSpace(snapshot.AccessToken))
         {
             throw new InvalidOperationException("El perfil no contiene access_token para consultar el consumo.");
@@ -31,22 +33,42 @@ internal sealed class UsageClient : IUsageClient
             request.Headers.Add("ChatGPT-Account-Id", snapshot.AccountId);
         }
 
-        using var response = await Http.SendAsync(request, cancellationToken);
+        using var response = await _http.SendAsync(request, cancellationToken);
         if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
         {
-            return UsageRecord.FromError(
-                $"La sesión guardada no fue aceptada ({(int)response.StatusCode}). Activa esta cuenta e inicia sesión de nuevo si es necesario.") with { HttpStatus = (int)response.StatusCode };
+            return UsageRecord.FromError(QuotaFailure.Authentication) with { HttpStatus = (int)response.StatusCode };
         }
         if (!response.IsSuccessStatusCode)
         {
             var retry = response.Headers.RetryAfter;
             var seconds = retry?.Delta?.TotalSeconds ?? (retry?.Date - DateTimeOffset.UtcNow)?.TotalSeconds ?? 60;
-            return UsageRecord.FromError($"La consulta de límites devolvió {(int)response.StatusCode}.") with
+            return UsageRecord.FromError(QuotaFailure.FromStatus((int)response.StatusCode)) with
             { HttpStatus = (int)response.StatusCode, RetryAfterSeconds = (int)Math.Clamp(seconds, 1, 86400) };
         }
 
         var json = JsonNode.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
-        return NormalizeWhamUsage(json);
+        var usage = NormalizeWhamUsage(json);
+        // An optional inventory failure must never discard a successful quota reading.
+        var budget = TimeSpan.FromSeconds(10) - started.Elapsed;
+        if (usage.Resets is { Status: "ok", DetailsComplete: true } || budget <= TimeSpan.FromMilliseconds(100)) return usage;
+        try
+        {
+            using var optional = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            optional.CancelAfter(budget < TimeSpan.FromSeconds(3) ? budget : TimeSpan.FromSeconds(3));
+            var details = ProviderHttp.Bearer($"{ResolveChatGptBaseUrl(codexConfigPath)}/wham/rate-limit-reset-credits", snapshot.AccessToken);
+            details.Headers.UserAgent.ParseAdd("AICountsManager");
+            details.Headers.CacheControl = new() { NoStore = true };
+            if (!string.IsNullOrWhiteSpace(snapshot.AccountId)) details.Headers.Add("ChatGPT-Account-Id", snapshot.AccountId);
+            var inventory = await ProviderHttp.SendAsync(_http, details, optional.Token).ConfigureAwait(false);
+            var reading = inventory.Status == 200
+                ? ResetInventoryParser.Codex(inventory.Body, usage.SessionLimitNotApplicable, DateTimeOffset.UtcNow)
+                : ResetInventory.Unknown(DateTimeOffset.UtcNow, inventory.Status, inventory.RetryAfter);
+            usage = usage with { Resets = reading.AvailableCount is null && usage.Resets?.AvailableCount is not null
+                ? usage.Resets with { HttpStatus = reading.HttpStatus, RetryAfterSeconds = reading.RetryAfterSeconds } : reading };
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException or OperationCanceledException)
+        { cancellationToken.ThrowIfCancellationRequested(); }
+        return usage;
     }
 
     internal static UsageRecord NormalizeWhamUsage(JsonNode? root)
@@ -68,6 +90,8 @@ internal sealed class UsageClient : IUsageClient
             SessionLimitNotApplicable = AccountPlan.IsWeeklyOnlyPlan(plan, windows),
             Session = classified.Session,
             Weekly = classified.Weekly,
+            Resets = ResetInventoryParser.Codex(System.Text.Json.JsonSerializer.SerializeToElement(root),
+                AccountPlan.IsWeeklyOnlyPlan(plan, windows), DateTimeOffset.UtcNow, summary: true),
         };
     }
 

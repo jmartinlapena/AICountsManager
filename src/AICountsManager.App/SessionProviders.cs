@@ -136,9 +136,8 @@ internal static class ProviderHttp
         return r;
     }
     public static ProviderUsage Failure(string provider, ClientSession? session, int? status = null, int? retry = null) =>
-        ProviderUsage.Unavailable(provider, status == 429 ? "Consulta limitada por el proveedor. Espera antes de actualizar."
-            : session is null || status is 401 or 403 ? "Inicia sesión en " + (provider == ProviderIds.Claude ? "Claude Desktop o Claude Code" : "Cursor") + " y vuelve a actualizar."
-            : "No se pudo consultar el uso. Vuelve a actualizar.") with { Identity = session?.Fingerprint, HttpStatus = status, RetryAfterSeconds = retry,
+        ProviderUsage.Unavailable(provider, session is null ? "Inicia sesión en " + (provider == ProviderIds.Claude ? "Claude Desktop o Claude Code" : "Cursor") + " y vuelve a actualizar."
+            : QuotaFailure.FromStatus(status)) with { Identity = session?.Fingerprint, HttpStatus = status, RetryAfterSeconds = retry,
                 Status = session is null ? "disconnected" : "error" };
 }
 internal sealed class ClaudeQuotaProvider(IClientSessionSource sessions, HttpClient http) : IQuotaProvider
@@ -150,9 +149,18 @@ internal sealed class ClaudeQuotaProvider(IClientSessionSource sessions, HttpCli
     {
         var session = sessions.Read(); if (session is null) return ProviderHttp.Failure(Id, null);
         if (session.ExpiresAt <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return ProviderHttp.Failure(Id, session, 401);
-        var query = ProviderHttp.Bearer("https://api.anthropic.com/api/oauth/usage", session.AccessToken);
-        query.Headers.Add("anthropic-beta", "oauth-2025-04-20");
+        HttpRequestMessage UsageRequest(bool inventory)
+        {
+            var r = ProviderHttp.Bearer("https://api.anthropic.com/api/oauth/usage" + (inventory ? "?cedar_ember=1" : ""), session.AccessToken);
+            r.Headers.Add("anthropic-beta", "oauth-2025-04-20");
+            // The optional reset inventory is currently gated to compatible CLI surfaces.
+            r.Headers.TryAddWithoutValidation("User-Agent", inventory ? "claude-cli/2.1.316 (external, cli)" : "AICountsManager");
+            r.Headers.CacheControl = new() { NoStore = true }; return r;
+        }
+        var query = UsageRequest(true);
         var response = await ProviderHttp.SendAsync(http, query, token).ConfigureAwait(false);
+        if (response.Status is 400 or 403)
+            response = await ProviderHttp.SendAsync(http, UsageRequest(false), token).ConfigureAwait(false);
         if (response.Status != 200) return ProviderHttp.Failure(Id, session, response.Status, response.RetryAfter);
         var quotas = Parse(response.Body);
         if (quotas.Count == 0) return ProviderHttp.Failure(Id, session);
@@ -179,7 +187,8 @@ internal sealed class ClaudeQuotaProvider(IClientSessionSource sessions, HttpCli
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or OperationCanceledException) { token.ThrowIfCancellationRequested(); }
         if (!verified || sessions.Read()?.Fingerprint != session.Fingerprint) return ProviderHttp.Failure(Id, null);
-        return new(Id, identity ?? session.Fingerprint, name, email, plan, DateTimeOffset.UtcNow.ToString("O"), "ok", null, quotas);
+        return new(Id, identity ?? session.Fingerprint, name, email, plan, DateTimeOffset.UtcNow.ToString("O"), "ok", null, quotas,
+            Resets: ResetInventoryParser.Claude(response.Body, DateTimeOffset.UtcNow));
     }
     internal static IReadOnlyList<ProviderQuota> Parse(JsonElement root)
     {

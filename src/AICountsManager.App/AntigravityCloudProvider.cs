@@ -100,9 +100,9 @@ internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentia
                 var quotas = await ReadQuotas(credential.AuthMethod, token).ConfigureAwait(false);
                 if (quotas.Status is 401 or 403 && !refreshed)
                 { await Refresh(credential, token).ConfigureAwait(false); quotas = await ReadQuotas(credential.AuthMethod, token).ConfigureAwait(false); }
-                if (quotas.Status is 401 or 403) return Missing("La sesión de Antigravity ha caducado. Vuelve a iniciar sesión en Antigravity.");
+                if (quotas.Status is 401 or 403) return Missing(QuotaFailure.Authentication) with { HttpStatus = quotas.Status };
                 if (quotas.Status == 429) return Missing("Google ha limitado las consultas. Espera antes de actualizar.") with { HttpStatus = 429, RetryAfterSeconds = 60 };
-                if (quotas.Values is null) return Missing("No se pudo consultar Google. Inténtalo de nuevo más tarde.");
+                if (quotas.Values is null) return Missing(QuotaFailure.FromStatus(quotas.Status)) with { HttpStatus = quotas.Status };
                 if (_plan is null)
                 {
                     try
@@ -129,9 +129,10 @@ internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentia
                 return new(Id, AuthHash.Bytes(Encoding.UTF8.GetBytes(credential.Email.ToLowerInvariant())), credential.Name, credential.Email,
                     _plan, DateTimeOffset.UtcNow.ToString("O"), "ok", null, quotas.Values);
             }
-            catch (CloudAuthException) { return Missing("La sesión de Antigravity ha caducado. Vuelve a iniciar sesión en Antigravity."); }
+            catch (CloudAuthException) { return Missing(QuotaFailure.Authentication) with { HttpStatus = 401 }; }
             catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException or InvalidOperationException)
-            { return Missing("No se pudo consultar Google. Inténtalo de nuevo más tarde."); }
+            { return Missing(QuotaFailure.FromException(ex)) with { HttpStatus = ex is HttpRequestException { StatusCode: { } status } ? (int)status : null,
+                RetryAfterSeconds = ex is HttpRequestException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } ? 60 : null }; }
         }
         finally { _gate.Release(); }
     }
@@ -146,7 +147,8 @@ internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentia
             ["client_secret"] = "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", ["grant_type"] = "refresh_token", ["refresh_token"] = credential.Refresh
         }), false, token).ConfigureAwait(false);
         if (response.Status is >= 400 and < 500 && response.Status is not (408 or 429)) throw new CloudAuthException();
-        if (response.Status != 200 || response.Json?["access_token"] is not JsonValue access || !access.TryGetValue<string>(out var value) || string.IsNullOrEmpty(value)) throw new IOException();
+        if (response.Status != 200) throw new HttpRequestException("OAuth service refused the request.", null, (System.Net.HttpStatusCode)response.Status);
+        if (response.Json?["access_token"] is not JsonValue access || !access.TryGetValue<string>(out var value) || string.IsNullOrEmpty(value)) throw new System.Text.Json.JsonException();
         _access = value;
         var lifetime = response.Json?["expires_in"] is JsonValue seconds && seconds.TryGetValue<int>(out var n) ? Math.Clamp(n, 1, 86400) : 3600;
         _expiry = DateTimeOffset.UtcNow.AddSeconds(lifetime);
@@ -160,16 +162,18 @@ internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentia
     {
         List<ProviderQuota>? values = null;
         int? refusal = null;
+        int? failureStatus = null;
+        Exception? transportFailure = null;
         foreach (var host in QuotaHosts(authMethod))
         {
             (int Status, JsonNode? Json) response;
             try { response = await Post("https://" + host + "/v1internal:retrieveUserQuotaSummary", new StringContent("{}", Encoding.UTF8, "application/json"), true, token).ConfigureAwait(false); }
             catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException
-                || ex is OperationCanceledException && !token.IsCancellationRequested) { continue; }
+                || ex is OperationCanceledException && !token.IsCancellationRequested) { transportFailure = ex; continue; }
             // A token may be valid only on its metered deployment. A 429 still stops the batch.
             if (response.Status == 429) return (429, null);
             if (response.Status is 401 or 403) { refusal ??= response.Status; continue; }
-            if (response.Status != 200) continue;
+            if (response.Status != 200) { failureStatus ??= response.Status; continue; }
             var parsed = AntigravityQuotaProvider.ParseSummary(response.Json);
             if (parsed is null) continue;
             values ??= [];
@@ -181,7 +185,8 @@ internal sealed class AntigravityCloudProvider(IAntigravityCredentials credentia
             }
             if (values.Count >= 5 && values.All(q => q.UsedPercent is not null)) break;
         }
-        return (values is null ? refusal ?? 503 : 200, values);
+        if (values is null && refusal is null && failureStatus is null && transportFailure is not null) throw transportFailure;
+        return (values is null ? refusal ?? failureStatus ?? 503 : 200, values);
     }
     private async Task<(int Status, JsonNode? Json)> Post(string url, HttpContent content, bool bearer, CancellationToken token)
     {

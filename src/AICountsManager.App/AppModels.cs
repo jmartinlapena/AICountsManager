@@ -113,6 +113,7 @@ internal sealed record UsageRecord
     public bool SessionLimitNotApplicable { get; init; }
     public UsageWindow Session { get; init; } = new(null, null, null);
     public UsageWindow Weekly { get; init; } = new(null, null, null);
+    public ResetInventory? Resets { get; init; }
 
     public static UsageRecord Empty() => new();
 
@@ -143,7 +144,7 @@ internal sealed record ProfileState(
     UsageWindow? WeeklyWindow = null,
     string? PlanType = null,
     bool SessionLimitNotApplicable = false,
-    string? CheckedAt = null);
+    string? CheckedAt = null, ResetInventory? Resets = null);
 
 internal sealed record DashboardState(
     ProfileState ActiveProfile,

@@ -121,7 +121,7 @@ internal sealed partial class AICountsManagerService : IDisposable
             .ToList();
         var binary = _codexEnabled ? CodexBinaryLocator.Find() : null;
         var runtime = _codexEnabled ? _processController.CaptureState() : new CodexRuntimeState(false, null, []);
-        var version = typeof(AICountsManagerService).Assembly.GetName().Version?.ToString(3) ?? "3.3.0";
+        var version = typeof(AICountsManagerService).Assembly.GetName().Version?.ToString(3) ?? "3.4.0";
         var settings = !_codexEnabled ? $"v{version} · Codex desactivado · perfiles conservados" : binary is null
             ? $"v{version} · Codex no encontrado. Define CODEX_BINARY."
             : $"v{version} · Watcher activo · Verificación estricta: {(config.StrictVerification ? "sí" : "no")}";
@@ -257,7 +257,7 @@ internal sealed partial class AICountsManagerService : IDisposable
         catch (Exception ex)
         {
             var active = requestedProfile;
-            var error = UsageRecord.FromError(ex.Message);
+            var error = UsageRecord.FromError(QuotaFailure.FromException(ex));
             if (!string.IsNullOrWhiteSpace(active))
             {
                 _profiles.SaveUsage(active, error);
@@ -307,9 +307,9 @@ internal sealed partial class AICountsManagerService : IDisposable
                         var snapshot = live is not null && live.Identity.Matches(stored.Identity) && live.CompareGenerationTo(stored) >= 0 ? live : stored;
                         return await ReadCodexUsageAsync(snapshot, timeout.Token);
                     }
-                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return UsageRecord.FromError("La consulta agotó el tiempo de espera."); }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return UsageRecord.FromError(QuotaFailure.Timeout); }
                     catch (OperationCanceledException) { throw; }
-                    catch (Exception) { return UsageRecord.FromError("No se pudo consultar esta cuenta. Comprueba la conexión y la sesión guardada."); }
+                    catch (Exception ex) { return UsageRecord.FromError(QuotaFailure.FromException(ex)); }
                 }));
                 // One writer: saving the shared JSON cache concurrently would lose other accounts' results.
                 for (var i = 0; i < group.Length; i++)
@@ -317,8 +317,8 @@ internal sealed partial class AICountsManagerService : IDisposable
                     var result = results[i];
                     _profiles.SaveUsage(group[i].Name, result); completed++;
                     if (result.Status == "error") failed++;
-                    if (result.HttpStatus == 429)
-                    { limited = true; _nextBatchAllowed = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, result.RetryAfterSeconds ?? 60)); }
+                    if (result.HttpStatus == 429 || result.Resets?.HttpStatus == 429)
+                    { limited = true; _nextBatchAllowed = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, result.RetryAfterSeconds ?? result.Resets?.RetryAfterSeconds ?? 60)); }
                     progress?.Report($"Actualizando cuentas · {completed}/{profiles.Count}");
                 }
             }
@@ -508,7 +508,7 @@ internal sealed partial class AICountsManagerService : IDisposable
             Error: usage.Error,
             Email: profile?.Email,
             SessionWindow: usage.Session, WeeklyWindow: usage.Weekly,
-            PlanType: usage.PlanType, SessionLimitNotApplicable: usage.SessionLimitNotApplicable, CheckedAt: usage.CheckedAt);
+            PlanType: usage.PlanType, SessionLimitNotApplicable: usage.SessionLimitNotApplicable, CheckedAt: usage.CheckedAt, Resets: usage.Resets);
     }
 
     private static string BuildStatus(UsageRecord usage)
