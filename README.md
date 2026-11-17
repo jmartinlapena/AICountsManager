@@ -34,7 +34,7 @@ La gestión de cuentas utiliza un contrato común y capacidades explícitas, con
 - Si el próximo reset conocido caduca dentro de siete días o menos, la fila plegada muestra «Caduca pronto» y el tiempo restante en amarillo. Las caducidades posteriores no generan ese aviso.
 - Actualizar/F5 consulta también los resets de todas las cuentas guardadas, conservando los límites de concurrencia y las pausas del proveedor. No activa cuentas ni abre clientes.
 - Los avisos de una sola línea diferencian conexión, autenticación, servicio y tiempo de espera. Un fallo conserva la última lectura de cuotas y resets, también en una sesión de Claude todavía no registrada.
-- Se reutilizan las cachés, el ciclo de consulta y el reloj visible existentes. No se añaden temporizadores, sondeos de conectividad ni procesos auxiliares. [Implementación y pruebas](docs/available-resets.md).
+- Se reutilizan las cachés, el ciclo de consulta y el reloj visible existentes. No se añaden temporizadores, sondeos de conectividad ni procesos auxiliares. [Implementación](docs/available-resets.md) · [Validación y distribución](docs/VALIDATION-3.4.0.md).
 
 ## Requisitos de desarrollo
 
