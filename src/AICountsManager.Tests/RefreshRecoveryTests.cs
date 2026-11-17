@@ -54,14 +54,16 @@ internal static partial class Program
         try
         {
             await Task.Delay(100);
+            tray.ToggleWidget();
             Directory.Move(paths.AccountsDir, saved); File.WriteAllText(paths.AccountsDir, "unavailable");
             await Task.Run(() => method.Invoke(tray, [service, EventArgs.Empty]));
             var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             control.BeginInvoke(() => posted.SetResult());
             await posted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(File.ReadAllText(service.Diagnostics.FilePath).Contains("tray.apply-state"), "Posted failure did not leave diagnostic trace.");
-            Check(!control.IsDisposed && !tray.WidgetCreated, "Posted failure closed the tray or created the flyout.");
+            Check(!control.IsDisposed && tray.WidgetVisible, "Posted failure closed the tray or visible flyout.");
             File.Delete(paths.AccountsDir); Directory.Move(saved, paths.AccountsDir);
+            tray.ToggleWidget();
             tray.ToggleWidget();
             Check(tray.WidgetVisible, "Tray could not reopen after a failed notification.");
         }

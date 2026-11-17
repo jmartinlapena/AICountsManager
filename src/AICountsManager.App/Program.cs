@@ -5,16 +5,21 @@ namespace AICountsManager;
 
 internal static class Program
 {
+    internal const string BackgroundArgument = "--background";
+    internal const string ShowPanelArgument = "--show-panel";
+
     [STAThread]
     static void Main(string[] args)
     {
         if (args is ["--self-test", var output]) { DistributionProbe.Run(output); return; }
+        using var openPanel = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\AICountsManager.OpenPanel");
         using var singleInstance = new Mutex(
             initiallyOwned: true,
             name: @"Local\AICountsManager.SingleInstance",
             createdNew: out var createdNew);
         if (!createdNew)
         {
+            if (args is not [BackgroundArgument]) openPanel.Set();
             return;
         }
 
@@ -28,7 +33,8 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         try
         {
-            Application.Run(new TrayApplicationContext());
+            if (args is [ShowPanelArgument]) openPanel.Set();
+            Application.Run(new TrayApplicationContext(openPanel: openPanel));
             diagnostics.Write("process.message-loop-returned");
         }
         catch (Exception ex)
@@ -55,10 +61,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
     internal bool WidgetCreated => _widget is not null;
     internal bool WidgetVisible => _widget?.Visible == true;
     private readonly System.Windows.Forms.Timer _refreshTimer;
-    private bool _exiting;
+    private readonly RegisteredWaitHandle? _openPanelWait;
+    private volatile bool _exiting;
     private readonly CancellationTokenSource _lifetime = new();
 
-    public TrayApplicationContext(AICountsManagerService? service = null)
+    public TrayApplicationContext(AICountsManagerService? service = null, WaitHandle? openPanel = null)
     {
         _service = service ?? new AICountsManagerService();
         // Marshal watcher notifications without creating the WPF/DWM flyout at startup.
@@ -93,6 +100,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _refreshTimer.Start();
 
         _service.StateChanged += OnServiceStateChanged;
+        if (openPanel is not null)
+            _openPanelWait = ThreadPool.RegisterWaitForSingleObject(openPanel, (_, _) => RequestOpenPanel(), null, Timeout.Infinite, false);
         ApplyState();
         _ = StartAsync();
     }
@@ -101,6 +110,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (_exiting) return;
         _exiting = true;
+        _openPanelWait?.Unregister(null);
         _service.Diagnostics.Write("tray.exit-thread");
         _lifetime.Cancel();
         _refreshTimer.Stop();
@@ -148,6 +158,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _widget.Activate();
     }
 
+    private void RequestOpenPanel()
+    {
+        if (_exiting) return;
+        try
+        {
+            _dispatcher.BeginInvoke(() =>
+            {
+                if (_exiting) return;
+                try { OpenWidget(); }
+                catch (Exception ex) { ReportRefreshFailure("tray.open-panel", ex); }
+            });
+        }
+        catch (InvalidOperationException) when (_exiting || _dispatcher.IsDisposed) { }
+    }
+
     private async Task StartAsync()
     {
         try
@@ -180,7 +205,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (_exiting) return;
         _service.Diagnostics.Write(operation, ex);
-        try { _widget?.ShowRefreshError(); }
+        try { if (_widget?.Visible == true) _widget.ShowRefreshError(); }
         catch (Exception displayError) { _service.Diagnostics.Write("tray.error-display", displayError); }
     }
 
@@ -192,8 +217,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         try
         {
-            var state = _service.BuildDashboardState();
-            _widget?.ApplyState(state);
+            var state = _widget?.Visible == true ? _service.BuildDashboardState() : null;
+            if (state is not null) _widget!.ApplyState(state);
             _notifyIcon.Text = _service.BuildTrayTooltip(state);
         }
         catch (Exception ex) { ReportRefreshFailure("tray.apply-state", ex); }

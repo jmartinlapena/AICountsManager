@@ -14,6 +14,8 @@ internal sealed record ClientTokenEvent(string Date, string Model, long Tokens);
 // Incremental, bounded local reads. Cached identifiers are hashes; no message text is retained.
 internal sealed class ClaudeTokenHistory(string home, string cachePath) : IProviderTokenHistory
 {
+    private const int MaxFiles = 10_000, MaxEvents = 50_000, MaxReadBytes = 4 * 1024 * 1024;
+    private const int ScanBudgetMs = 600;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private Dictionary<string, FileIndex> _files = new(StringComparer.OrdinalIgnoreCase);
     private bool _loaded;
@@ -28,7 +30,10 @@ internal sealed class ClaudeTokenHistory(string home, string cachePath) : IProvi
     private TokenHistorySnapshot Scan(CancellationToken token)
     {
         LastBytesRead = 0; var clock = Stopwatch.StartNew(); bool changed = false, partial = false, pending = false;
-        var today = DateOnly.FromDateTime(DateTime.Today); var cutoff = today.AddDays(1 - TokenHistory.RetentionDays).ToString("yyyy-MM-dd");
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var day = today.ToString("yyyy-MM-dd");
+        var cutoff = today.AddDays(1 - TokenHistory.RetentionDays).ToString("yyyy-MM-dd");
+        var oldestFile = DateTime.UtcNow.AddDays(-TokenHistory.RetentionDays);
         try
         {
             if (!_loaded)
@@ -37,33 +42,49 @@ internal sealed class ClaudeTokenHistory(string home, string cachePath) : IProvi
                 if (File.Exists(cachePath) && new FileInfo(cachePath).Length < 12 * 1024 * 1024)
                 {
                     var saved = JsonSerializer.Deserialize<Dictionary<string, FileIndex>>(File.ReadAllText(cachePath));
-                    if (saved is not null && saved.Count <= 10000 && saved.Values.All(f => f is not null && f.Offset >= 0 && f.Events is not null && f.Events.Count <= 50000 && f.Events.Values.All(Valid))) _files = saved;
+                    if (saved is not null && saved.Count <= MaxFiles && saved.Values.All(f => f is not null && f.Offset >= 0 && f.Events is not null && f.Events.Values.All(Valid))
+                        && saved.Values.Sum(f => (long)f.Events.Count) <= MaxEvents) _files = saved;
                 }
             }
+            foreach (var (key, index) in _files.ToArray())
+            {
+                token.ThrowIfCancellationRequested();
+                foreach (var id in index.Events.Where(e => string.CompareOrdinal(e.Value.Date, cutoff) < 0).Select(e => e.Key).ToArray())
+                    changed |= index.Events.Remove(id);
+                if (index.Events.Count == 0 && index.Modified < oldestFile.Ticks)
+                    changed |= _files.Remove(key);
+            }
+
             var root = Path.Combine(home, "projects");
             if (Directory.Exists(root) && (File.GetAttributes(root) & FileAttributes.ReparsePoint) == 0)
             {
                 var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = false };
                 var eventCount = _files.Values.Sum(f => f.Events.Count);
-                foreach (var path in Directory.EnumerateFiles(root, "*.jsonl", options).Take(10001))
+                foreach (var path in Directory.EnumerateFiles(root, "*.jsonl", options))
                 {
                     token.ThrowIfCancellationRequested();
-                    if (_files.Count >= 10000 || clock.ElapsedMilliseconds > 600) { partial = pending = true; break; }
-                    var info = new FileInfo(path); if (info.LastWriteTimeUtc < DateTime.UtcNow.AddDays(-365)) continue;
+                    if (clock.ElapsedMilliseconds > ScanBudgetMs) { partial = pending = true; break; }
                     var key = AuthHash.Bytes(Encoding.UTF8.GetBytes(Path.GetRelativePath(root, path)));
-                    if (!_files.TryGetValue(key, out var index)) _files[key] = index = new();
+                    var info = new FileInfo(path);
+                    if (info.LastWriteTimeUtc < oldestFile) continue;
+                    var known = _files.TryGetValue(key, out var existing);
+                    if (!known && _files.Count >= MaxFiles) { partial = true; continue; }
+                    var index = existing ?? new FileIndex();
                     if (index.Length == info.Length && index.Modified == info.LastWriteTimeUtc.Ticks && index.Completed) continue;
-                    if (LastBytesRead >= 4 * 1024 * 1024 || eventCount >= 50000) { partial = true; pending = eventCount < 50000; break; }
-                    if (info.Length < index.Offset || (index.Completed && index.Length == info.Length && index.Modified != info.LastWriteTimeUtc.Ticks) || index.Created != info.CreationTimeUtc.Ticks)
-                    { eventCount -= index.Events.Count; _files[key] = index = new(); }
+                    if (LastBytesRead >= MaxReadBytes) { partial = pending = true; break; }
+                    var replace = known && (info.Length < index.Offset || (index.Completed && index.Length == info.Length && index.Modified != info.LastWriteTimeUtc.Ticks)
+                        || index.Created != info.CreationTimeUtc.Ticks);
+                    if (eventCount >= MaxEvents && !(replace && index.Events.Count > 0)) { partial = true; continue; }
                     using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.SequentialScan);
+                    if (replace) { eventCount -= index.Events.Count; index = new(); }
+                    _files[key] = index;
                     file.Position = index.Offset; using var line = new MemoryStream();
-                    while (LastBytesRead < 4 * 1024 * 1024 && clock.ElapsedMilliseconds < 600 && eventCount < 50000)
+                    while (LastBytesRead < MaxReadBytes && clock.ElapsedMilliseconds < ScanBudgetMs && eventCount < MaxEvents)
                     {
                         token.ThrowIfCancellationRequested(); var b = file.ReadByte(); if (b < 0) break; LastBytesRead++;
                         if (b == 10)
                         {
-                            if (!index.Discard && Parse(line.ToArray()) is { } entry && string.CompareOrdinal(entry.Event.Date, cutoff) >= 0 && string.CompareOrdinal(entry.Event.Date, today.ToString("yyyy-MM-dd")) <= 0)
+                            if (!index.Discard && Parse(line.ToArray()) is { } entry && string.CompareOrdinal(entry.Event.Date, cutoff) >= 0 && string.CompareOrdinal(entry.Event.Date, day) <= 0)
                             {
                                 if (!index.Events.TryGetValue(entry.Id, out var old)) { index.Events[entry.Id] = entry.Event; eventCount++; }
                                 else if (entry.Event.Tokens >= old.Tokens) index.Events[entry.Id] = entry.Event;
@@ -75,11 +96,9 @@ internal sealed class ClaudeTokenHistory(string home, string cachePath) : IProvi
                         else line.WriteByte((byte)b);
                     }
                     index.Completed = file.Position >= file.Length; index.Length = info.Length; index.Modified = info.LastWriteTimeUtc.Ticks; index.Created = info.CreationTimeUtc.Ticks;
-                    changed = true; if (!index.Completed) { partial = true; pending = eventCount < 50000; }
+                    changed = true; if (!index.Completed) { partial = true; pending = eventCount < MaxEvents; }
                 }
             }
-            foreach (var index in _files.Values)
-                foreach (var id in index.Events.Where(e => string.CompareOrdinal(e.Value.Date, cutoff) < 0).Select(e => e.Key).ToArray()) { index.Events.Remove(id); changed = true; }
             partial |= _files.Values.Any(f => f.Uncertain);
             if (changed)
             {

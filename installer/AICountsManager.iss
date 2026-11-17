@@ -41,12 +41,12 @@ Name: "startup"; Description: "Iniciar AICountsManager con Windows"; Flags: unch
 Source: "{#PackageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\AICountsManager"; Filename: "{app}\AICountsManager.exe"; WorkingDir: "{app}"
-Name: "{userdesktop}\AICountsManager"; Filename: "{app}\AICountsManager.exe"; WorkingDir: "{app}"; Tasks: desktopicon
-Name: "{userstartup}\AICountsManager"; Filename: "{app}\AICountsManager.exe"; WorkingDir: "{app}"; Tasks: startup
+Name: "{group}\AICountsManager"; Filename: "{app}\AICountsManager.exe"; Parameters: "--show-panel"; WorkingDir: "{app}"
+Name: "{userdesktop}\AICountsManager"; Filename: "{app}\AICountsManager.exe"; Parameters: "--show-panel"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{userstartup}\AICountsManager"; Filename: "{app}\AICountsManager.exe"; Parameters: "--background"; WorkingDir: "{app}"; Tasks: startup
 
 [Run]
-Filename: "{app}\AICountsManager.exe"; Description: "Abrir AICountsManager"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\AICountsManager.exe"; Parameters: "--show-panel"; Description: "Abrir AICountsManager"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 Type: files; Name: "{userstartup}\AICountsManager.lnk"

@@ -153,7 +153,6 @@ internal sealed record DashboardState(
     string DataFolder,
     string LogsFolder,
     bool StrictVerification,
-    bool CodexRunning,
     string? UpdatedLabel = null, IReadOnlyList<ProviderUsage>? OtherAccounts = null, IReadOnlyList<string>? AccountOrder = null,
     bool CodexBinaryMissing = false)
 {

@@ -7,7 +7,7 @@ internal sealed partial class AICountsManagerService
 
     private IAccountManager CreateCodexAccountProvider() => new ManagedAccountProvider(ProviderIds.Codex,
         AccountCapabilities.Reauthenticate, () => _codexEnabled, () => PendingCodexName, ReadCodexAccounts,
-        SetCodexEnabledAsync, async (all, token) => { if (all) await RefreshAllUsageCoreAsync(null, token, includeOtherProviders: false); else await RefreshActiveProfileAsync(token); }, new(
+        SetCodexEnabledAsync, async (all, token) => { if (all) await RefreshAllCodexUsageAsync(null, token); else await RefreshActiveProfileAsync(token); }, new(
             async (name, token) => { await InitializeAsync(token); return await BeginCodexAccountCoreAsync(name, token); }, CancelCodexAccountCoreAsync,
             async (id, reauthenticate, token) =>
             {

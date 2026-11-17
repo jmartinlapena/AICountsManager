@@ -9,6 +9,12 @@ internal static partial class Program
 {
     private static readonly (string Name, Func<Task> Run)[] Tests =
     [
+        ("review validates Codex destinations, rejects empty quotas and shows weekly tray balance", ReviewCodexQuotaAsync),
+        ("review scopes rate limits by provider and shares manual and automatic Codex backoff", ReviewProviderBackoffAsync),
+        ("review keeps Claude quota readings and backoff isolated by account", ReviewClaudeBackoffAsync),
+        ("review isolates a corrupt Claude index and reserves space before enrollment", ReviewClaudeIndexAsync),
+        ("review updates known Claude history at capacity and reclaims expired entries", ReviewClaudeHistoryCapacityAsync),
+        ("review opens the existing flyout on request and only updates the tray while hidden", ReviewTrayAsync),
         ("quota feedback hides empty inventories and highlights only expirations within seven days", QuotaFeedbackExpiryAsync),
         ("quota feedback distinguishes transport, authentication, service and cancellation across providers", QuotaFeedbackTransportAsync),
         ("quota feedback preserves cached quotas and resets during connection failures", QuotaFeedbackCacheAsync),
@@ -680,8 +686,13 @@ internal static partial class Program
         public bool Running { get; private set; } = running;
         public int CloseCalls { get; private set; }
         public int RestartCalls { get; private set; }
+        public int CaptureCalls { get; private set; }
 
-        public CodexRuntimeState CaptureState() => new(Running, "fake-codex.exe", Running ? [42] : []);
+        public CodexRuntimeState CaptureState()
+        {
+            CaptureCalls++;
+            return new(Running, "fake-codex.exe", Running ? [42] : []);
+        }
 
         public Task<bool> CloseNormallyAsync(TimeSpan timeout, CancellationToken cancellationToken)
         {

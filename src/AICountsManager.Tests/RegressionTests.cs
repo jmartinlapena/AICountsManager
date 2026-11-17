@@ -111,7 +111,7 @@ internal static partial class Program
         [SampleProfile("Personal", true) with { PlanType = "prolite", SessionLimitNotApplicable = true, SessionWindow = new(null, null, null), SessionUsedPercent = null, SessionRemainingPercent = null },
          SampleProfile("Trabajo", false) with { PlanType = "plus" },
          SampleProfile("Empresa", false) with { PlanType = "self_serve_business_prolite", SessionLimitNotApplicable = true, SessionWindow = new(null, null, null), SessionUsedPercent = null, SessionRemainingPercent = null }],
-        "Estado de ejemplo", "", "", false, true, "Hace 2 min");
+        "Estado de ejemplo", "", "", false, "Hace 2 min");
     private static ProfileState SampleProfile(string name, bool active) => new(name, active, 35, 65, "18:30", 18, 82, "26/10", "Hace 2 min", "ok", null, name.ToLowerInvariant() + "@example.test", new UsageWindow(35, 300, DateTimeOffset.UtcNow.AddHours(3).ToUnixTimeSeconds()), new UsageWindow(18, 10080, DateTimeOffset.UtcNow.AddDays(3).ToUnixTimeSeconds()));
     private static Task UiCardLifetimeAsync() => InTemporaryStoreAsync(paths => RunOnUiThreadAsync(() =>
     {

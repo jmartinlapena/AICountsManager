@@ -23,7 +23,11 @@ internal sealed class UsageClient(HttpClient? http = null) : IUsageClient
             throw new InvalidOperationException("El perfil no contiene access_token para consultar el consumo.");
         }
 
-        var url = $"{ResolveChatGptBaseUrl(codexConfigPath)}/wham/usage";
+        var baseUrl = ResolveChatGptBaseUrl(codexConfigPath);
+        if (baseUrl is null)
+            return UsageRecord.FromError("Destino de Codex no autorizado. Revisa chatgpt_base_url.");
+
+        var url = new Uri(baseUrl, "wham/usage");
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", snapshot.AccessToken);
         request.Headers.UserAgent.ParseAdd("AICountsManager");
@@ -46,8 +50,11 @@ internal sealed class UsageClient(HttpClient? http = null) : IUsageClient
             { HttpStatus = (int)response.StatusCode, RetryAfterSeconds = (int)Math.Clamp(seconds, 1, 86400) };
         }
 
-        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        JsonNode? json;
+        try { json = JsonNode.Parse(await response.Content.ReadAsStringAsync(cancellationToken)); }
+        catch (System.Text.Json.JsonException) { return UsageRecord.FromError(QuotaFailure.InvalidResponse); }
         var usage = NormalizeWhamUsage(json);
+        if (usage.Status != "ok") return usage;
         // An optional inventory failure must never discard a successful quota reading.
         var budget = TimeSpan.FromSeconds(10) - started.Elapsed;
         if (usage.Resets is { Status: "ok", DetailsComplete: true } || budget <= TimeSpan.FromMilliseconds(100)) return usage;
@@ -55,7 +62,7 @@ internal sealed class UsageClient(HttpClient? http = null) : IUsageClient
         {
             using var optional = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             optional.CancelAfter(budget < TimeSpan.FromSeconds(3) ? budget : TimeSpan.FromSeconds(3));
-            var details = ProviderHttp.Bearer($"{ResolveChatGptBaseUrl(codexConfigPath)}/wham/rate-limit-reset-credits", snapshot.AccessToken);
+            var details = ProviderHttp.Bearer(new Uri(baseUrl, "wham/rate-limit-reset-credits").AbsoluteUri, snapshot.AccessToken);
             details.Headers.UserAgent.ParseAdd("AICountsManager");
             details.Headers.CacheControl = new() { NoStore = true };
             if (!string.IsNullOrWhiteSpace(snapshot.AccountId)) details.Headers.Add("ChatGPT-Account-Id", snapshot.AccountId);
@@ -73,19 +80,23 @@ internal sealed class UsageClient(HttpClient? http = null) : IUsageClient
 
     internal static UsageRecord NormalizeWhamUsage(JsonNode? root)
     {
-        var rateLimit = root?["rate_limit"] as JsonObject;
+        if (root is not JsonObject payload) return UsageRecord.FromError(QuotaFailure.InvalidResponse);
+        var rateLimit = payload["rate_limit"] as JsonObject;
         var windows = new List<UsageWindow>();
         AddWhamWindow(rateLimit?["primary_window"], windows);
         AddWhamWindow(rateLimit?["secondary_window"], windows);
 
         var classified = UsageWindowClassifier.Classify(windows);
-        var plan = AccountPlan.Read(root?["plan_type"]);
+        if (classified.Session.UsedPercent is null && classified.Weekly.UsedPercent is null)
+            return UsageRecord.FromError(QuotaFailure.InvalidResponse);
+
+        var plan = AccountPlan.Read(payload["plan_type"]);
 
         return new UsageRecord
         {
             CheckedAt = DateTimeOffset.UtcNow.ToString("O"),
             Status = "ok",
-            Email = root?["email"]?.GetValue<string?>(),
+            Email = payload["email"] is JsonValue email && email.TryGetValue<string>(out var address) ? address : null,
             PlanType = plan,
             SessionLimitNotApplicable = AccountPlan.IsWeeklyOnlyPlan(plan, windows),
             Session = classified.Session,
@@ -97,54 +108,44 @@ internal sealed class UsageClient(HttpClient? http = null) : IUsageClient
 
     private static void AddWhamWindow(JsonNode? node, ICollection<UsageWindow> destination)
     {
-        if (node is null)
-        {
-            return;
-        }
-        destination.Add(new UsageWindow(
-            node["used_percent"]?.GetValue<double?>(),
-            node["limit_window_seconds"]?.GetValue<int?>() is int seconds ? seconds / 60 : null,
-            node["reset_at"]?.GetValue<long?>()));
+        if (node is not JsonObject window) return;
+        var used = window["used_percent"] is JsonValue percent && percent.TryGetValue<double>(out var value)
+            && double.IsFinite(value) && value is >= 0 and <= 100 ? value : (double?)null;
+        var duration = window["limit_window_seconds"] is JsonValue length && length.TryGetValue<int>(out var seconds)
+            ? seconds % 60 == 0 ? seconds / 60 : -1 : (int?)null;
+        var reset = window["reset_at"] is JsonValue time && time.TryGetValue<long>(out var timestamp)
+            && timestamp > 0 && timestamp <= DateTimeOffset.MaxValue.ToUnixTimeSeconds() ? timestamp : (long?)null;
+        destination.Add(new UsageWindow(used, duration, reset));
     }
 
-    private static string ResolveChatGptBaseUrl(string codexConfigPath)
+    private static Uri? ResolveChatGptBaseUrl(string codexConfigPath)
     {
-        var baseUrl = "https://chatgpt.com/backend-api";
-        if (!File.Exists(codexConfigPath))
-        {
-            return baseUrl;
-        }
-
+        var defaultUrl = new Uri("https://chatgpt.com/backend-api/");
+        Uri? configured = null;
         try
         {
-            foreach (var rawLine in File.ReadAllLines(codexConfigPath))
+            foreach (var rawLine in File.ReadLines(codexConfigPath))
             {
                 var line = rawLine.Split('#')[0].Trim();
+                if (line.StartsWith('[')) break; // Only root TOML settings apply.
                 var parts = line.Split('=', 2);
-                if (parts.Length != 2 || parts[0].Trim() != "chatgpt_base_url")
-                {
-                    continue;
-                }
-
-                var value = parts[1].Trim().Trim('"', '\'').TrimEnd('/');
-                if ((value.StartsWith("https://chatgpt.com", StringComparison.OrdinalIgnoreCase)
-                        || value.StartsWith("https://chat.openai.com", StringComparison.OrdinalIgnoreCase))
-                    && !value.Contains("/backend-api", StringComparison.OrdinalIgnoreCase))
-                {
-                    value += "/backend-api";
-                }
-
-                if (value.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
-                    || value.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)
-                    || value.StartsWith("http://localhost", StringComparison.OrdinalIgnoreCase))
-                {
-                    return value;
-                }
+                if (parts[0].Trim().Trim('"', '\'') != "chatgpt_base_url") continue;
+                if (parts.Length != 2 || configured is not null) return null;
+                var value = parts[1].Trim();
+                if (value.Length < 2 || value[0] is not ('"' or '\'') || value[^1] != value[0]) return null;
+                if (!Uri.TryCreate(value[1..^1], UriKind.Absolute, out var uri)
+                    || uri.Scheme != Uri.UriSchemeHttps || !uri.IsDefaultPort
+                    || uri.IdnHost is not ("chatgpt.com" or "chat.openai.com")
+                    || uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0
+                    || uri.AbsolutePath is not ("/" or "/backend-api" or "/backend-api/")) return null;
+                configured = new Uri($"https://{uri.IdnHost}/backend-api/");
             }
         }
-        catch
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return defaultUrl; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or UriFormatException)
         {
+            return null;
         }
-        return baseUrl;
+        return configured ?? defaultUrl;
     }
 }

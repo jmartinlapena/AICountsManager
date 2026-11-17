@@ -29,6 +29,9 @@ internal sealed class ClaudeAccounts : IDisposable
     private Dictionary<string, ProviderUsage> _readings = [];
     private ProviderUsage? _current;
     private const string CurrentCacheKey = "@current:";
+    private const int MaxAccounts = 100;
+    private const string IndexUnavailable = "No se pudo leer el índice de Claude. Los perfiles guardados se conservan.";
+    private readonly bool _indexUnavailable;
     private DateTimeOffset _providerNext;
     private volatile bool _enabled;
     private bool _disposed;
@@ -45,29 +48,41 @@ internal sealed class ClaudeAccounts : IDisposable
         _root = Path.Combine(appHome, "provider-accounts", "claude");
         _index = Path.Combine(_root, "accounts.json"); _cache = Path.Combine(appHome, "cache", "claude-accounts.json");
         _config = Path.Combine(appHome, "config", "provider-claude.json");
-        if (File.Exists(_index))
+        try
         {
-            var stored = ClaudeSessionArchive.ReadFile(_index, 256 * 1024);
-            _state = JsonSerializer.Deserialize<ClaudeAccountState>(stored!) ?? throw new InvalidDataException("Índice de Claude inválido.");
-            if (_state.Accounts.Count > 100 || _state.Accounts.Select(a => a.Id).Distinct().Count() != _state.Accounts.Count) throw new InvalidDataException("Índice de Claude inválido.");
-            foreach (var account in _state.Accounts) { _ = CredentialPath(account.Id); _name(account.Name); }
+            if (Directory.Exists(_index)) throw new InvalidDataException("El índice de Claude debe ser un archivo.");
+            if (ClaudeSessionArchive.ReadFile(_index, 256 * 1024) is { } stored)
+            {
+                var state = JsonSerializer.Deserialize<ClaudeAccountState>(stored);
+                if (state?.Accounts is not { Count: <= MaxAccounts } accounts || accounts.Any(a => a is null
+                    || !Guid.TryParseExact(a.Id, "N", out _) || !Guid.TryParse(a.Account, out _) || !Guid.TryParse(a.Organization, out _))
+                    || accounts.Select(a => a.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() != accounts.Count
+                    || accounts.Select(a => a.Identity).Distinct(StringComparer.OrdinalIgnoreCase).Count() != accounts.Count)
+                    throw new InvalidDataException("Índice de Claude inválido.");
+                foreach (var account in accounts) _name(account.Name);
+                if (state.Pending is { } pending) _name(pending.Name);
+                _state = state;
+            }
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or JsonException or ArgumentException or InvalidOperationException)
+        { _indexUnavailable = true; _log(IndexUnavailable, ex); }
         try
         {
             if (File.Exists(_config)) _enabled = JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllBytes(_config))?.GetValueOrDefault(ProviderIds.Claude) == true;
-            if (File.Exists(_cache))
+            if (!_indexUnavailable && ClaudeSessionArchive.ReadFile(_cache, 1024 * 1024) is { } cached)
             {
-                using var cache = JsonDocument.Parse(ClaudeSessionArchive.ReadFile(_cache, 1024 * 1024)!);
+                using var cache = JsonDocument.Parse(cached);
                 _readings = cache.RootElement.EnumerateObject().Select(p => KeyValuePair.Create(p.Name, ProviderUsage.ReadCache(p.Value)))
-                .Where(p => p.Value is not null)
-                .Where(p => (p.Key.StartsWith(CurrentCacheKey, StringComparison.Ordinal) || _state.Accounts.Any(a => a.Id == p.Key)) && p.Value!.Provider == ProviderIds.Claude)
+                .Where(p => p.Value is { Provider: ProviderIds.Claude }
+                    && (p.Key.StartsWith(CurrentCacheKey, StringComparison.Ordinal)
+                        || _state.Accounts.Any(a => a.Id == p.Key && a.Identity == p.Value.Identity)))
                 .ToDictionary(p => p.Key, p => p.Value! with { Status = "stale", Error = "Última lectura · pendiente de actualizar", Resets = p.Value!.Resets?.Stale() });
             }
             if (_enabled && _archive.LiveSource.Read() is { } session
                 && _readings.GetValueOrDefault(CurrentCacheKey + session.Fingerprint) is { } current) _current = current;
         }
-        catch (Exception ex) when (ex is IOException or JsonException) { _log("No se pudo leer la caché de Claude.", ex); }
-        if (_enabled) StartWatchers();
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or JsonException or InvalidOperationException or ArgumentException) { _log("No se pudo leer la caché de Claude.", ex); }
+        if (_enabled && !_indexUnavailable) StartWatchers();
     }
 
     public IReadOnlyList<ProviderUsage> Accounts
@@ -75,8 +90,9 @@ internal sealed class ClaudeAccounts : IDisposable
         get
         {
             if (!_enabled) return [];
+            if (_indexUnavailable) return [ProviderUsage.Unavailable(ProviderIds.Claude, IndexUnavailable)];
             var state = _state; var readings = _readings;
-            var rows = state.Accounts.Select(a => (readings.GetValueOrDefault(a.Id) ?? ProviderUsage.Unavailable(ProviderIds.Claude, "Pendiente de actualizar"))
+            var rows = state.Accounts.Select(a => (readings.GetValueOrDefault(a.Id) ?? ProviderUsage.Unavailable(ProviderIds.Claude, "Pendiente de consultar"))
                 with { Name = a.Name, Email = a.Email, Plan = readings.GetValueOrDefault(a.Id)?.Plan ?? a.Plan, Identity = a.Identity, ProfileId = a.Id, IsActive = state.Pending is null && state.ActiveId == a.Id }).ToList();
             if (_current is { } current && !state.Accounts.Any(a => a.Identity == current.Identity) && current.Status is "ok" or "stale") rows.Add(current);
             if (rows.Count == 0 && state.Pending is null) rows.Add(_current ?? ProviderUsage.Unavailable(ProviderIds.Claude, "Inicia sesión en Claude Desktop o Claude Code y actualiza."));
@@ -90,22 +106,31 @@ internal sealed class ClaudeAccounts : IDisposable
     }
     private void SaveState(ClaudeAccountState state)
     {
+        RequireIndex();
         Directory.CreateDirectory(_root); AtomicFile.TryRestrictDirectory(_root);
         AtomicFile.WriteText(_index, JsonSerializer.Serialize(state)); _state = state;
     }
     private void SaveUsage(string id, ProviderUsage usage)
     {
+        var account = _state.Accounts.Single(a => a.Id == id);
+        if (usage.Identity != account.Identity)
+        {
+            // Error readings can be tied to a credential fingerprint. Their quota data is not attributable.
+            usage = ProviderUsage.Unavailable(ProviderIds.Claude, usage.Error ?? "No se pudo verificar esta cuenta de Claude.")
+                with { HttpStatus = usage.HttpStatus, RetryAfterSeconds = usage.RetryAfterSeconds };
+        }
         if (_readings.TryGetValue(id, out var previous))
             usage = usage.Status != "ok"
                 ? previous with { Error = usage.Error, HttpStatus = usage.HttpStatus, RetryAfterSeconds = usage.RetryAfterSeconds,
                     Status = "stale", Resets = previous.Resets?.Stale() }
                 : usage with { Resets = ResetInventory.Merge(usage.Resets, previous.Resets) };
-        var next = new Dictionary<string, ProviderUsage>(_readings) { [id] = usage };
+        var next = new Dictionary<string, ProviderUsage>(_readings) { [id] = usage with { Identity = account.Identity } };
         AtomicFile.WriteText(_cache, JsonSerializer.Serialize(next)); _readings = next;
     }
     private ClaudeAccount SaveAccount(string name, ClaudeLogin login, ClaudeCredentialBundle bundle)
     {
         var existing = _state.Accounts.FirstOrDefault(a => a.Identity == login.Identity);
+        if (existing is null) RequireCapacity();
         var account = existing is null ? new ClaudeAccount(Guid.NewGuid().ToString("N"), _name(name), login.Account, login.Organization, login.Session.Email, login.Session.Plan)
             : existing with { Email = login.Session.Email ?? existing.Email, Plan = login.Session.Plan ?? existing.Plan };
         Directory.CreateDirectory(_root); AtomicFile.TryRestrictDirectory(_root);
@@ -122,6 +147,14 @@ internal sealed class ClaudeAccounts : IDisposable
         for (var i = 2; _state.Accounts.Any(a => a.Name.Equals(candidate, StringComparison.OrdinalIgnoreCase)) || _state.Pending?.Name == candidate || reserved == candidate; i++) candidate = "Claude anterior " + i;
         return candidate;
     }
+    private void RequireIndex()
+    {
+        if (_indexUnavailable) throw new InvalidOperationException(IndexUnavailable);
+    }
+    private void RequireCapacity(int slots = 1)
+    {
+        if (_state.Accounts.Count > MaxAccounts - slots) throw new InvalidOperationException($"Claude admite hasta {MaxAccounts} cuentas guardadas. Libera espacio antes de continuar.");
+    }
     private async Task<ClaudeAccount?> PreserveAsync(CancellationToken token, string? reserved = null)
     {
         var bundle = _archive.Capture();
@@ -132,6 +165,7 @@ internal sealed class ClaudeAccounts : IDisposable
             if (bundle.DesktopAuth is not null || bundle.CodeAuth is not null) throw new InvalidOperationException("No se puede verificar la sesión saliente de Claude. Inicia sesión de nuevo antes de cambiarla.");
             return null;
         }
+        if (reserved is not null && !_state.Accounts.Any(a => a.Identity == login.Identity)) RequireCapacity(2);
         return SaveAccount(PreviousName(reserved), login, bundle);
     }
     private async Task MutateAsync(Func<Task> mutation, CancellationToken token)
@@ -141,6 +175,7 @@ internal sealed class ClaudeAccounts : IDisposable
         try
         {
             if (!_enabled) throw new InvalidOperationException("Activa Claude en Ajustes antes de gestionar sus cuentas.");
+            RequireIndex();
             _archive.RequireClosed();
             using var global = new GlobalAuthSwitchLock(_archive.DesktopConfig);
             await global.AcquireAsync(TimeSpan.FromSeconds(10), token).ConfigureAwait(false);
@@ -157,6 +192,7 @@ internal sealed class ClaudeAccounts : IDisposable
     public Task BeginAsync(string name, CancellationToken token = default) => MutateAsync(async () =>
     {
         name = _name(name);
+        RequireCapacity();
         if (_state.Pending is not null) throw new InvalidOperationException("Completa o cancela el alta pendiente de Claude.");
         if (_state.Accounts.Any(a => a.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Ya existe una cuenta de Claude con ese nombre.");
         var previous = await PreserveAsync(token, name).ConfigureAwait(false);
@@ -205,6 +241,7 @@ internal sealed class ClaudeAccounts : IDisposable
         name = _name(name); await _gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
+            RequireIndex();
             if (_state.Accounts.Any(a => a.Id != id && a.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Ese nombre ya existe.");
             if (!_state.Accounts.Any(a => a.Id == id)) throw new InvalidOperationException("La cuenta ya no existe.");
             SaveState(_state with { Accounts = _state.Accounts.Select(a => a.Id == id ? a with { Name = name } : a).ToArray() });
@@ -229,7 +266,7 @@ internal sealed class ClaudeAccounts : IDisposable
             if (!enabled && _state.Pending is not null) throw new InvalidOperationException("Completa o cancela el alta de Claude antes de desactivarlo.");
             AtomicFile.WriteText(_config, JsonSerializer.Serialize(new Dictionary<string, bool> { [ProviderIds.Claude] = enabled }));
             _enabled = enabled;
-            if (enabled) StartWatchers(); else { StopWatchers(); _current = null; }
+            if (enabled && !_indexUnavailable) StartWatchers(); else { StopWatchers(); _current = null; }
         }
         finally { _gate.Release(); _changed(); }
         if (enabled) await RefreshAsync(false, token).ConfigureAwait(false);
@@ -246,7 +283,7 @@ internal sealed class ClaudeAccounts : IDisposable
 
     public async Task RefreshAsync(bool all, CancellationToken token = default)
     {
-        if (!_enabled || !await _gate.WaitAsync(0, token).ConfigureAwait(false)) return;
+        if (!_enabled || _indexUnavailable || !await _gate.WaitAsync(0, token).ConfigureAwait(false)) return;
         try
         {
             if (!_enabled) return;
@@ -286,7 +323,6 @@ internal sealed class ClaudeAccounts : IDisposable
                 if (_current.HttpStatus == 429)
                 {
                     _providerNext = _next["current"];
-                    foreach (var account in _state.Accounts) SaveUsage(account.Id, _current);
                     return;
                 }
             }

@@ -46,6 +46,7 @@ internal sealed partial class AICountsManagerService : IDisposable
     private bool _disposed;
     private readonly TokenHistory _history;
     private DateTimeOffset _nextBatchAllowed;
+    private DateTimeOffset _codexRetryAfter;
     public TokenHistorySnapshot History
     {
         get
@@ -120,8 +121,8 @@ internal sealed partial class AICountsManagerService : IDisposable
                 string.Equals(profile.Name, activeMeta?.Name, StringComparison.OrdinalIgnoreCase)))
             .ToList();
         var binary = _codexEnabled ? CodexBinaryLocator.Find() : null;
-        var runtime = _codexEnabled ? _processController.CaptureState() : new CodexRuntimeState(false, null, []);
-        var version = typeof(AICountsManagerService).Assembly.GetName().Version?.ToString(3) ?? "3.4.0";
+        var otherAccounts = OtherAccounts;
+        var version = typeof(AICountsManagerService).Assembly.GetName().Version?.ToString(3) ?? "3.4.1";
         var settings = !_codexEnabled ? $"v{version} · Codex desactivado · perfiles conservados" : binary is null
             ? $"v{version} · Codex no encontrado. Define CODEX_BINARY."
             : $"v{version} · Watcher activo · Verificación estricta: {(config.StrictVerification ? "sí" : "no")}";
@@ -133,17 +134,16 @@ internal sealed partial class AICountsManagerService : IDisposable
             DataFolder: _paths.AppHome,
             LogsFolder: _paths.LogsDir,
             StrictVerification: config.StrictVerification,
-            CodexRunning: runtime.IsRunning,
-            UpdatedLabel: FormatRelative(usageCache.Accounts.Values.Select(u => u.CheckedAt).Concat(OtherAccounts.Select(a => a.CheckedAt))
+            UpdatedLabel: FormatRelative(usageCache.Accounts.Values.Select(u => u.CheckedAt).Concat(otherAccounts.Select(a => a.CheckedAt))
                 .Where(value => DateTimeOffset.TryParse(value, out _)).OrderByDescending(value => DateTimeOffset.Parse(value!)).FirstOrDefault()),
-            OtherAccounts: OtherAccounts, AccountOrder: config.AccountOrder, CodexBinaryMissing: _codexEnabled && binary is null);
+            OtherAccounts: otherAccounts, AccountOrder: config.AccountOrder, CodexBinaryMissing: _codexEnabled && binary is null);
     }
 
-    public string BuildTrayTooltip(DashboardState state)
+    public string BuildTrayTooltip(DashboardState? state = null)
     {
         if (!_codexEnabled)
         {
-            var other = state.OtherAccounts?.FirstOrDefault(a => a.Quotas.Any(q => q.CurrentUsed.HasValue));
+            var other = (state?.OtherAccounts ?? OtherAccounts).FirstOrDefault(a => a.Quotas.Any(q => q.CurrentUsed.HasValue));
             if (other is not null)
             {
                 var used = other.Quotas.First(q => q.CurrentUsed.HasValue).CurrentUsed!.Value;
@@ -152,15 +152,18 @@ internal sealed partial class AICountsManagerService : IDisposable
             }
             return "AICountsManager";
         }
-        var active = state.ActiveProfile;
-        var session = active.SessionRemainingPercent.HasValue
-            ? $"{active.SessionRemainingPercent.Value:0}% restante"
-            : "sin datos";
-        var text = $"AICountsManager - {active.Name} - {session}";
-        return text.Length <= 63 ? text : text[..63];
+        var name = state?.ActiveProfile.Name ?? _profiles.LoadAppConfig().ActiveProfile;
+        if (string.IsNullOrWhiteSpace(name)) return "AICountsManager";
+        var usage = state is null ? GetUsage(_profiles.LoadUsageCache(), name) : null;
+        var session = state is null ? DisplayRemainingPercent(usage!.Session) : state.ActiveProfile.SessionRemainingPercent;
+        var weekly = state is null ? DisplayRemainingPercent(usage!.Weekly) : state.ActiveProfile.WeeklyRemainingPercent;
+        var weeklyOnly = state?.ActiveProfile.SessionLimitNotApplicable ?? usage!.SessionLimitNotApplicable;
+        var balance = weeklyOnly && weekly is double week ? $"{week:0} % semanal restante"
+            : session is double remaining ? $"{remaining:0} % restante" : "sin datos";
+        var maxName = 63 - balance.Length - 3;
+        if (name.Length > maxName) name = name[..(maxName - 1)] + "…";
+        return $"{name} · {balance}";
     }
-
-    public bool IsCodexRunning() => _processController.CaptureState().IsRunning;
 
     public bool StrictVerificationEnabled() => _profiles.LoadAppConfig().StrictVerification;
 
@@ -218,7 +221,7 @@ internal sealed partial class AICountsManagerService : IDisposable
         try
         {
             var config = _profiles.LoadAppConfig();
-            if (!_codexEnabled) return null;
+            if (!_codexEnabled || DateTimeOffset.UtcNow < _codexRetryAfter) return null;
             requestedProfile = config.ActiveProfile;
             if (string.IsNullOrWhiteSpace(config.ActiveProfile))
             {
@@ -246,6 +249,7 @@ internal sealed partial class AICountsManagerService : IDisposable
             // Strict app-server verification is reserved for the account-switch flow.
             var usage = await ReadCodexUsageAsync(live, cancellationToken);
 
+            ApplyCodexRetryAfter(usage);
             _profiles.SaveUsage(config.ActiveProfile, usage);
             NotifyStateChanged();
             return usage;
@@ -273,20 +277,35 @@ internal sealed partial class AICountsManagerService : IDisposable
     }
 
     // Read-only queries with bounded concurrency. Never installs or renews an account's credentials.
-    public Task<string> RefreshAllUsageAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default) =>
-        RefreshAllUsageCoreAsync(progress, cancellationToken, includeOtherProviders: true);
+    public async Task<string> RefreshAllUsageAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    {
+        var result = await RefreshAllCodexUsageAsync(progress, cancellationToken);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(60));
+        try { await _accountProviders.RefreshExceptAsync(ProviderIds.Codex, true, deadline.Token); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+        cancellationToken.ThrowIfCancellationRequested();
+        NotifyStateChanged();
+        if (!_codexEnabled || result is null)
+            return OtherAccounts.Count != 0 ? "Actualización terminada. Consulta el resultado en cada cuenta." : "Historial actualizado. Añade una cuenta para consultar sus cuotas.";
+        return result;
+    }
 
-    private async Task<string> RefreshAllUsageCoreAsync(IProgress<string>? progress, CancellationToken cancellationToken, bool includeOtherProviders)
+    private async Task<string?> RefreshAllCodexUsageAsync(IProgress<string>? progress, CancellationToken cancellationToken)
     {
         await InitializeAsync(cancellationToken);
         ThrowIfDisposed();
+        if (!_codexEnabled) return null;
         if (_pendingCodex is not null) await ReconcileActiveAuthAsync(cancellationToken);
         if (!await _usageGate.WaitAsync(0, cancellationToken)) return "Ya hay una actualización en curso.";
         try
         {
-            if (DateTimeOffset.UtcNow < _nextBatchAllowed)
-                return "Espera " + UsagePresentation.Duration((_nextBatchAllowed - DateTimeOffset.UtcNow).TotalSeconds) + " antes de volver a consultar.";
+            var now = DateTimeOffset.UtcNow;
+            var next = _codexRetryAfter > _nextBatchAllowed ? _codexRetryAfter : _nextBatchAllowed;
+            if (now < next)
+                return "Espera " + UsagePresentation.Duration((next - now).TotalSeconds) + " antes de volver a consultar Codex.";
             var profiles = _codexEnabled ? _profiles.ListProfiles() : Array.Empty<ProfileMeta>();
+            if (profiles.Count == 0) return null;
             Diagnostics.Write("quota.batch.begin count=" + profiles.Count);
             AuthSnapshot? live = null;
             try { if (_codexEnabled && File.Exists(_paths.ActiveAuthPath)) live = await StableAuthFile.ReadAsync(_paths.ActiveAuthPath, cancellationToken: cancellationToken); }
@@ -317,21 +336,14 @@ internal sealed partial class AICountsManagerService : IDisposable
                     var result = results[i];
                     _profiles.SaveUsage(group[i].Name, result); completed++;
                     if (result.Status == "error") failed++;
-                    if (result.HttpStatus == 429 || result.Resets?.HttpStatus == 429)
-                    { limited = true; _nextBatchAllowed = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, result.RetryAfterSeconds ?? result.Resets?.RetryAfterSeconds ?? 60)); }
+                    limited |= ApplyCodexRetryAfter(result);
                     progress?.Report($"Actualizando cuentas · {completed}/{profiles.Count}");
                 }
             }
-            if (includeOtherProviders && !deadline.IsCancellationRequested)
-            {
-                try { await _accountProviders.RefreshExceptAsync(ProviderIds.Codex, true, deadline.Token); }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
-            }
             cancellationToken.ThrowIfCancellationRequested();
-            _nextBatchAllowed = _nextBatchAllowed > DateTimeOffset.UtcNow ? _nextBatchAllowed : DateTimeOffset.UtcNow.AddSeconds(15);
+            _nextBatchAllowed = DateTimeOffset.UtcNow.AddSeconds(15);
             NotifyStateChanged();
             Diagnostics.Write($"quota.batch.complete completed={completed} failed={failed} limited={limited}");
-            if (profiles.Count == 0) return OtherAccounts.Count != 0 ? "Actualización terminada. Consulta el resultado en cada cuenta." : "Historial actualizado. Añade una cuenta para consultar sus cuotas.";
             var text = $"{completed - failed}/{profiles.Count} cuentas actualizadas";
             if (failed > 0) text += $" · {failed} sin conexión o sesión válida";
             if (completed < profiles.Count) text += $" · {profiles.Count - completed} pendientes";
@@ -339,6 +351,17 @@ internal sealed partial class AICountsManagerService : IDisposable
             return text + ".";
         }
         finally { _usageGate.Release(); }
+    }
+
+    // Both Codex refresh paths call this while holding the same usage gate.
+    private bool ApplyCodexRetryAfter(UsageRecord result)
+    {
+        if (result.HttpStatus != 429 && result.Resets?.HttpStatus != 429) return false;
+        var seconds = Math.Max(result.HttpStatus == 429 ? result.RetryAfterSeconds ?? 60 : 60,
+            result.Resets?.HttpStatus == 429 ? result.Resets.RetryAfterSeconds ?? 60 : 60);
+        var retryAfter = DateTimeOffset.UtcNow.AddSeconds(seconds);
+        if (retryAfter > _codexRetryAfter) _codexRetryAfter = retryAfter;
+        return true;
     }
 
     public Task AddCurrentProfileAsync(string profileName, CancellationToken cancellationToken = default) =>

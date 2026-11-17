@@ -36,7 +36,7 @@ internal sealed class WindowsIntegration(AppPaths paths)
             "dotnet",
             StringComparison.OrdinalIgnoreCase)
             && !string.IsNullOrWhiteSpace(entryAssembly);
-        var arguments = hostedByDotnet ? $"\"{entryAssembly}\"" : string.Empty;
+        var arguments = hostedByDotnet ? $"\"{entryAssembly}\" {Program.BackgroundArgument}" : Program.BackgroundArgument;
         var command = $"""
             $shell = New-Object -ComObject WScript.Shell
             $shortcut = $shell.CreateShortcut('{_paths.StartupShortcutPath.Replace("'", "''")}')
