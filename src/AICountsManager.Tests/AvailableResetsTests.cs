@@ -237,12 +237,19 @@ internal static partial class Program
         return Task.CompletedTask;
     }));
 
-    private static void SaveResetDemo(W.Window window, string output)
+    private static void SaveResetDemo(W.Window window, string output, W.FrameworkElement? region = null)
     {
         window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
         var bitmap = new M.Imaging.RenderTargetBitmap((int)(window.ActualWidth * 2), (int)(window.ActualHeight * 2), 192, 192, M.PixelFormats.Pbgra32);
         bitmap.Render(window);
-        var png = new M.Imaging.PngBitmapEncoder(); png.Frames.Add(M.Imaging.BitmapFrame.Create(bitmap));
+        M.Imaging.BitmapSource source = bitmap;
+        if (region is not null)
+        {
+            var origin = region.TranslatePoint(new W.Point(), window);
+            source = new M.Imaging.CroppedBitmap(bitmap, new W.Int32Rect((int)Math.Round(origin.X * 2),
+                (int)Math.Round(origin.Y * 2), (int)Math.Round(region.ActualWidth * 2), (int)Math.Round(region.ActualHeight * 2)));
+        }
+        var png = new M.Imaging.PngBitmapEncoder(); png.Frames.Add(M.Imaging.BitmapFrame.Create(source));
         using var file = File.Create(output); png.Save(file);
     }
 

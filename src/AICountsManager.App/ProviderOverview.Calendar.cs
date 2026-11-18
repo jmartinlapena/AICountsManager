@@ -179,6 +179,7 @@ internal sealed partial class ProviderOverview
         navigation.Margin = new(0, 0, 0, 4);
         summary.Children.Add(navigation);
 
+        var palette = CalendarPalette();
         var cells = new C.Primitives.UniformGrid { Columns = 7, FirstColumn = (start.DayNumber - MetricsPeriods.Monday(start).DayNumber), Margin = new(0) };
         foreach (var date in MetricsPeriods.Days(start, end))
         {
@@ -187,30 +188,23 @@ internal sealed partial class ProviderOverview
             var enabled = day is { Total: > 0 };
             var current = date == today;
             var selected = date == _selectedMonthDay && enabled;
-            var foreground = level == 4 ? HeatText() : day is { Total: 0, Covered: false } ? _theme.Muted : _theme.Text;
-            var plate = new C.Border
-            {
-                Height = 17, CornerRadius = new(4), Background = HeatBrush(level),
-                BorderThickness = new(selected ? 2 : current ? 1 : 0),
-                BorderBrush = selected || current ? UiTheme.Brush(foreground) : null,
-                Opacity = day is null ? .39 : 1,
-            };
-            var number = Label(date.Day.ToString(MetricsHistory.Culture), 10, current || selected, foreground);
-            number.HorizontalAlignment = W.HorizontalAlignment.Center;
-            plate.Child = number;
-            if (enabled)
-            {
-                var button = ActionButton(plate, "month-" + date.DayNumber, DayName(date, day),
-                    () => { _selectedMonthDay = _selectedMonthDay == date ? null : date; Redraw(); }, 17);
-                button.Margin = new(1, 1, 1, 0);
-                cells.Children.Add(button);
-            }
-            else
-            {
-                plate.Margin = new(1, 1, 1, 0);
-                W.Automation.AutomationProperties.SetName(plate, DayName(date, day));
-                cells.Children.Add(plate);
-            }
+            var number = new C.TextBlock { Text = date.Day.ToString(MetricsHistory.Culture),
+                TextAlignment = W.TextAlignment.Center };
+            if (current) number.TextDecorations = W.TextDecorations.Underline;
+            var name = DayName(date, day) + (current ? " · Hoy" : "") + (selected ? " · Seleccionado" : "");
+            var button = enabled
+                ? ActionButton(number, "month-" + date.DayNumber, name,
+                    () => { _selectedMonthDay = _selectedMonthDay == date ? null : date; Redraw(); }, 0)
+                : new C.Button { Content = number, IsEnabled = false };
+            button.SetResourceReference(C.Control.StyleProperty, "CalendarDayButton");
+            W.Automation.AutomationProperties.SetName(button, name);
+            button.Background = palette[level].Fill;
+            button.Foreground = palette[level].Ink;
+            button.BorderThickness = new(selected ? 1.5 : 0);
+            button.FontSize = 10;
+            button.FontWeight = current || selected ? W.FontWeights.SemiBold : W.FontWeights.Normal;
+            if (day is null && !_theme.HighContrast) button.Opacity = .52;
+            cells.Children.Add(button);
         }
         calendar.Children.Add(cells);
         var amount = Label(TotalText, 16, true);
@@ -222,27 +216,12 @@ internal sealed partial class ProviderOverview
         var less = Label("Menos", 9.5, color: _theme.Muted);
         less.Margin = new(0, 0, 4, 0);
         scale.Children.Add(less);
-        for (var i = 0; i <= 4; i++)
-            scale.Children.Add(new C.Border { Width = 9, Height = 8, CornerRadius = new(2), Margin = new(0, 0, 3, 0), Background = HeatBrush(i) });
+        foreach (var tone in palette)
+            scale.Children.Add(new C.Border { Width = 8, Height = 8, CornerRadius = new(2), Margin = new(0, 0, 2, 0), Background = tone.Fill });
         scale.Children.Add(Label("Más", 9.5, color: _theme.Muted));
-        var ranking = days.Values.Where(d => d.Total > 0).OrderByDescending(d => d.Total).ThenBy(d => d.Date).Take(3).ToArray();
-        var activeDays = days.Values.Count(d => d.Total > 0);
-        scale.Margin = new(0, 6, 0, 2);
-        summary.Children.Add(scale);
-        if (DisplayedPeriod.HasKnownTotal)
-            summary.Children.Add(Label(activeDays == 1 ? "1 día con actividad" : $"{activeDays} días con actividad", 10, color: _theme.Muted));
+        summary.Children.Add(new C.Viewbox { Child = scale, Height = 14, Margin = new(0, 6, 0, 2),
+            HorizontalAlignment = W.HorizontalAlignment.Left, StretchDirection = C.StretchDirection.DownOnly });
         Add(layout, 5);
-        if (ranking.Length > 0)
-        {
-            var title = ranking.Length == 1 ? "Día de mayor uso" : $"{ranking.Length} días de mayor uso";
-            var rankingButton = ActionButton(Pair(Label(title, 10, true, _theme.Accent),
-                Chevron(_rankingExpanded ? "\uE70E" : "\uE70D", 8), 20),
-                "ranking", title + (_rankingExpanded ? " · Ocultar" : " · Mostrar"), () => { _rankingExpanded = !_rankingExpanded; Redraw(); }, 20);
-            summary.Children.Add(rankingButton);
-            if (_rankingExpanded)
-                foreach (var item in ranking)
-                    Add(Pair(Label(Cap(item.Date.ToString("dddd d", MetricsHistory.Culture)), 10, color: _theme.Muted), Right(DayAmount(item), 10), 19), 0, 0, 8);
-        }
         if (_selectedMonthDay is { } selectedDate && days.TryGetValue(selectedDate, out var selectedDay) && selectedDay.Total > 0)
         {
             Add(Rule(), 7);
@@ -270,14 +249,32 @@ internal sealed partial class ProviderOverview
         return headings;
     }
 
-    private static readonly byte[] HeatOpacity = [11, 38, 76, 129, 255];
-    private M.Brush HeatBrush(int level) => level == 0 ? UiTheme.Brush(_theme.Text, HeatOpacity[0])
-        : UiTheme.Brush(_theme.Accent, _theme.HighContrast ? (byte)(level == 4 ? 255 : 55 * level) : HeatOpacity[level]);
-
-    private M.Color HeatText()
+    // Opaque shades keep their spacing even over an accented acrylic backdrop.
+    private (M.Brush Fill, M.Brush Ink)[] CalendarPalette()
     {
-        if (_theme.HighContrast) return W.SystemColors.HighlightTextColor;
-        var color = _theme.Accent;
-        return .2126 * color.R + .7152 * color.G + .0722 * color.B >= 140 ? M.Color.FromRgb(23, 35, 38) : M.Colors.White;
+        var accent = _theme.HighContrast ? W.SystemColors.HighlightColor : _theme.SystemAccent ?? _theme.Accent;
+        var min = Math.Min(accent.R, Math.Min(accent.G, accent.B));
+        var span = Math.Max(accent.R, Math.Max(accent.G, accent.B)) - min;
+        byte Channel(byte value) => (byte)(44 + (value - min) * 152 / span);
+        var hue = span < 8 ? accent : M.Color.FromRgb(Channel(accent.R), Channel(accent.G), Channel(accent.B));
+
+        var luminance = Luminance(hue);
+        var dark = _theme.HighContrast ? Luminance(W.SystemColors.WindowColor) < .18 : _theme.Dark;
+        double[] stops = dark ? [.052, .14, .28, .49, .82] : [.82, .49, .28, .14, .052];
+        var palette = new (M.Brush Fill, M.Brush Ink)[stops.Length + 1];
+        palette[0] = (UiTheme.Brush(_theme.Text, 14), UiTheme.Brush(_theme.HighContrast ? _theme.Text : _theme.Muted));
+        for (var i = 0; i < stops.Length; i++)
+        {
+            var target = stops[i];
+            var end = target < luminance ? 0 : 1;
+            var mix = (target - luminance) / (end - luminance);
+            float Blend(float channel) => (float)(channel + (end - channel) * mix);
+            var fill = M.Color.FromScRgb(1, Blend(hue.ScR), Blend(hue.ScG), Blend(hue.ScB));
+            var ink = target > .179 ? M.Colors.Black : M.Colors.White;
+            palette[i + 1] = (UiTheme.Brush(fill), UiTheme.Brush(ink));
+        }
+        return palette;
     }
+
+    private static double Luminance(M.Color color) => .2126 * color.ScR + .7152 * color.ScG + .0722 * color.ScB;
 }

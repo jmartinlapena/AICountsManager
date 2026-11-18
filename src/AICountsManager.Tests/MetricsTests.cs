@@ -85,13 +85,17 @@ internal static partial class Program
         Check(panel.PeriodStart == week && panel.SelectedDay is null, "This week did not clear an unrelated selection.");
 
         panel.Select(UsageView.Calendar);
-        Check(panel.DisplayedPeriod.Total == 1_765_700 && MetricText(panel).Contains("15 días con actividad"), "Calendar total or activity-day count differs.");
+        Check(panel.DisplayedPeriod.Total == 1_765_700 && !MetricButtons(panel).ContainsKey("ranking")
+            && !MetricText(panel).Any(text => text.Contains("con actividad") || text.Contains("mayor uso")),
+            "Calendar lost the total or restored the removed summaries.");
         Check(!MetricButtons(panel).ContainsKey("month-" + today.AddDays(1).DayNumber), "A future calendar date can be selected.");
         UiClick(MetricButton(panel, "month-" + today.DayNumber));
         Check(panel.SelectedDay == today && panel.DisplayedPeriod.Total == 1_765_700 && MetricText(panel).Contains("146.800 tokens")
             && MetricText(panel).Contains("70.600") && MetricText(panel).Contains("24.800"), "Calendar day detail did not preserve the month and match Today.");
-        UiClick(MetricButton(panel, "ranking"));
-        Check(MetricText(panel).Contains("240.600 tokens"), "The monthly ranking did not reveal the top days.");
+        UiClick(MetricButton(panel, "month-" + today.AddDays(-1).DayNumber));
+        Check(panel.SelectedDay == today.AddDays(-1) && !MetricText(panel).Contains("146.800 tokens"), "The previous day is still selected.");
+        UiClick(MetricButton(panel, "month-" + today.AddDays(-1).DayNumber));
+        Check(panel.SelectedDay is null, "Clicking the selected calendar day did not close it.");
         panel.Select(UsageView.Today);
         today = today.AddDays(1);
         panel.RenderPending();
@@ -174,8 +178,8 @@ internal static partial class Program
         var other = MetricsSnapshot(today, [(today.AddDays(-30), "claude", 1_000_000L)]);
         var history = new MetricsHistory(ProviderHistory.Merge(new Dictionary<string, TokenHistorySnapshot>
             { [ProviderIds.Codex] = current, [ProviderIds.Claude] = other }), today);
-        int[] levels = [history.Heat(0), history.Heat(2_000_000), history.Heat(3_000_000), history.Heat(4_000_000), history.Heat(8_000_000)];
-        Check(levels.SequenceEqual([0, 1, 2, 3, 4]), "Million-token days saturated the calendar or used per-provider/per-month thresholds.");
+        int[] levels = [history.Heat(0), history.Heat(2_000_000), history.Heat(3_000_000), history.Heat(4_000_000), history.Heat(6_000_000), history.Heat(8_000_000)];
+        Check(levels.SequenceEqual([0, 1, 2, 3, 4, 5]), "Million-token days saturated the calendar or used per-provider/per-month thresholds.");
         var tied = new MetricsHistory(MetricsSnapshot(today, [(today, "m", 500L), (today.AddDays(-1), "m", 500L)]), today);
         Check(tied.Heat(500) == 2 && tied.Heat(0) == 0, "Identical positive days should have one neutral intensity.");
         return Task.CompletedTask;
@@ -260,7 +264,6 @@ internal static partial class Program
         UiClick(PickerControl(calendar, "date-" + new DateOnly(2026, 10, 1).DayNumber));
         Check(panel.PeriodStart == new DateOnly(2026, 10, 1) && !panel.PickerOpen, "Selecting a month did not update the calendar view.");
         UiClick(MetricButton(panel, "next"));
-        UiClick(MetricButton(panel, "ranking"));
         UiClick(MetricButton(panel, "month-" + today.DayNumber));
         panel.Select(UsageView.Week);
         Check(client.Calls == 0 && provider.Calls == 0 && before.SequenceEqual(Files()) && service.History.UpdatedAt is null,
@@ -302,6 +305,45 @@ internal static partial class Program
             var firstDot = Descendants(panel).OfType<System.Windows.Shapes.Ellipse>().First();
             Check(((M.SolidColorBrush)firstDot.Fill).Color == palette[0], "The Codex legend does not match the provider palette.");
             panel.Select(UsageView.Calendar);
+            UiClick(MetricButton(panel, "month-" + today.DayNumber));
+            form.Visual.UpdateLayout();
+            W.Rect Bounds(W.FrameworkElement item) => new(item.TranslatePoint(new W.Point(), panel), item.RenderSize);
+            W.Rect Tile(DateOnly date)
+            {
+                var cell = MetricButton(panel, "month-" + date.DayNumber);
+                var tile = Bounds((W.FrameworkElement)cell.Template.FindName("DayTile", cell));
+                var number = Bounds((W.FrameworkElement)cell.Template.FindName("DayNumber", cell));
+                Check(Math.Abs(tile.Left + tile.Width / 2 - number.Left - number.Width / 2) <= 1 &&
+                    Math.Abs(tile.Top + tile.Height / 2 - 1.5 - number.Top - number.Height / 2) <= 1,
+                    $"Off-center calendar number on {date}.");
+                return tile;
+            }
+            var chosen = Tile(today);
+            var left = Tile(today.AddDays(-1));
+            var above = Tile(today.AddDays(-7));
+            var previousDay = today.AddDays(-1);
+            UiClick(MetricButton(panel, "month-" + previousDay.DayNumber));
+            var todayButton = MetricButton(panel, "month-" + today.DayNumber);
+            Check(todayButton.BorderThickness == new W.Thickness(0) &&
+                ((C.TextBlock)todayButton.Content).TextDecorations == W.TextDecorations.Underline &&
+                MetricButton(panel, "month-" + previousDay.DayNumber).BorderThickness.Left > 0,
+                "Today and the selected date look like two selections.");
+            Check(chosen.Width <= 20 && chosen.Height <= 16 && chosen.Left - left.Right >= 3 &&
+                chosen.Top - above.Bottom >= 3, "Calendar tiles or selection borders overlap.");
+            var visible = MetricButtons(panel).Where(p => p.Key.StartsWith("month-")).Select(p => p.Value).ToArray();
+            static double Light(M.Brush brush)
+            {
+                var c = ((M.SolidColorBrush)brush).Color;
+                return .2126 * c.ScR + .7152 * c.ScG + .0722 * c.ScB;
+            }
+            var levels = visible.Select(cell => Light(cell.Background)).Distinct().Order().ToArray();
+            Check(levels.Length == 5 && levels.Zip(levels.Skip(1), (a, b) => (b + .05) / (a + .05)).All(ratio => ratio >= 1.5),
+                "Adjacent calendar intensities blend together.");
+            Check(visible.All(cell =>
+            {
+                var fill = Light(cell.Background); var ink = Light(cell.Foreground);
+                return (Math.Max(fill, ink) + .05) / (Math.Min(fill, ink) + .05) >= 4.5;
+            }), "A calendar numeral has insufficient contrast.");
             var frame = OpenMetricPicker(panel);
             var button = PickerControl(frame, "date-" + new DateOnly(2026, 11, 1).DayNumber);
             Check(((M.SolidColorBrush)button.Foreground).Color == theme.Text &&
@@ -385,7 +427,10 @@ internal static partial class Program
         SaveResetDemo(form.Visual, Path.Combine(output, "cuotas.png"));
         panel.Select(UsageView.Calendar);
         form.Visual.UpdateLayout();
-        SaveResetDemo(form.Visual, Path.Combine(output, "calendario.png"));
+        SaveResetDemo(form.Visual, Path.Combine(output, "calendario.png"), panel);
+        UiClick(MetricButton(panel, "month-" + date.AddDays(-1).DayNumber));
+        form.Visual.UpdateLayout();
+        SaveResetDemo(form.Visual, Path.Combine(output, "calendario-seleccion.png"), panel);
         SaveElement(OpenMetricPicker(panel), Path.Combine(output, "selector-mes-oscuro.png"));
         panel.ClosePicker();
         panel.Select(UsageView.Week);
@@ -397,6 +442,7 @@ internal static partial class Program
         light.SetHistoryPreview(ReferenceMetricsHistory()); light.Visual.Show();
         var lightPanel = UiField<ProviderOverview>(light, "_overview");
         lightPanel.Select(UsageView.Calendar); light.Visual.UpdateLayout();
+        SaveResetDemo(light.Visual, Path.Combine(output, "calendario-claro.png"), lightPanel);
         SaveElement(OpenMetricPicker(lightPanel), Path.Combine(output, "selector-mes-claro.png"));
         lightPanel.ClosePicker();
         lightPanel.Select(UsageView.Week); light.Visual.UpdateLayout();

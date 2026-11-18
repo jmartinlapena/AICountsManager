@@ -38,6 +38,39 @@
         </Setter.Value>
       </Setter>
     </Style>
+    <Style x:Key="CalendarDayButton" TargetType="Button">
+      <Setter Property="Height" Value="20"/>
+      <Setter Property="MinHeight" Value="0"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle"><Setter.Value><Style TargetType="Control">
+        <Setter Property="Template"><Setter.Value><ControlTemplate>
+          <Border MaxWidth="22" Height="18" Margin="1,0" CornerRadius="4" BorderThickness="1"
+                  BorderBrush="{DynamicResource Text}" IsHitTestVisible="False"/>
+        </ControlTemplate></Setter.Value></Setter>
+      </Style></Setter.Value></Setter>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+        <Grid Background="Transparent">
+          <Grid x:Name="DayTile" MaxWidth="20" Height="16" Margin="2,0" VerticalAlignment="Center">
+            <Border CornerRadius="3" Background="{TemplateBinding Background}"/>
+            <ContentPresenter x:Name="DayNumber" HorizontalAlignment="Center" VerticalAlignment="Center"
+                              TextBlock.TextAlignment="Center">
+              <!-- Align the visible Segoe UI digits within the tile, accounting for the font's line box. -->
+              <ContentPresenter.RenderTransform><TranslateTransform Y="-1.5"/></ContentPresenter.RenderTransform>
+            </ContentPresenter>
+            <Border CornerRadius="3" BorderBrush="{TemplateBinding Foreground}" BorderThickness="{TemplateBinding BorderThickness}"/>
+            <Border x:Name="HoverRing" CornerRadius="3" BorderBrush="{TemplateBinding Foreground}"
+                    BorderThickness="1" Visibility="Collapsed"/>
+          </Grid>
+        </Grid>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="HoverRing" Property="Visibility" Value="Visible"/></Trigger>
+          <Trigger Property="IsEnabled" Value="False">
+            <Setter Property="Cursor" Value="Arrow"/><Setter TargetName="HoverRing" Property="Visibility" Value="Collapsed"/>
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
     <Style x:Key="IconButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Width" Value="30"/><Setter Property="Height" Value="30"/>
       <Setter Property="Padding" Value="0"/><Setter Property="FontFamily" Value="Segoe Fluent Icons"/><Setter Property="FontSize" Value="14"/>

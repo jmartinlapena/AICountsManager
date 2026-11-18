@@ -110,9 +110,9 @@ internal sealed class MetricsHistory
         if (total <= 0) return 0;
         _heatThresholds ??= HeatThresholds();
         if (_heatThresholds.Length == 0) return 2;
-        if (total <= _heatThresholds[0]) return 1;
-        if (total <= _heatThresholds[1]) return 2;
-        return total <= _heatThresholds[2] ? 3 : 4;
+        for (var i = 0; i < _heatThresholds.Length; i++)
+            if (total <= _heatThresholds[i]) return i + 1;
+        return _heatThresholds.Length + 1;
     }
 
     private decimal[] HeatThresholds()
@@ -123,13 +123,14 @@ internal sealed class MetricsHistory
             .GroupBy(day => day.Key).Select(group => group.Sum(day => (decimal)day.Value.Total))
             .Distinct().Order().ToArray();
         if (totals.Length < 2) return [];
-        decimal Quartile(int quarter)
+        decimal Percentile(decimal fraction)
         {
-            var position = (totals.Length - 1) * quarter / 4m;
+            var position = (totals.Length - 1) * fraction;
             var lower = (int)position;
             return totals[lower] + (totals[lower + 1] - totals[lower]) * (position - lower);
         }
-        return [Quartile(1), Quartile(2), Quartile(3)];
+        // Keep a separate top band for exceptional days within the upper quartile.
+        return [Percentile(.25m), Percentile(.5m), Percentile(.75m), Percentile(.9m)];
     }
 
     public static string Number(decimal total) => total.ToString("N0", Culture);

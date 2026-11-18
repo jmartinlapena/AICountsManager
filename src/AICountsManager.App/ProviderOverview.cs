@@ -22,7 +22,7 @@ internal sealed partial class ProviderOverview : C.Border
     private TokenHistorySnapshot _snapshot = TokenHistorySnapshot.Empty;
     private MetricsHistory? _history;
     private DateOnly? _lastRenderDate, _weekStart, _monthStart, _selectedWeekDay, _selectedMonthDay, _expandedWeekModels;
-    private bool _dirty = true, _rankingExpanded;
+    private bool _dirty = true;
 
     public UsageView SelectedView { get; private set; } = UsageView.Today;
     internal bool PickerOpen => _picker?.IsOpen == true;
