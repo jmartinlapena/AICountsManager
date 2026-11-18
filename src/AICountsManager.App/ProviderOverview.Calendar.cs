@@ -44,6 +44,7 @@ internal sealed partial class ProviderOverview
         };
         _theme.Apply(frame.Resources, false);
         if (anchor.TryFindResource(typeof(C.Button)) is W.Style style) frame.Resources[typeof(C.Button)] = style;
+        var dateFocusCue = anchor.TryFindResource("CalendarFocusCue") as W.Style;
         System.Windows.Documents.TextElement.SetFontFamily(frame, anchor.FontFamily);
         I.KeyboardNavigation.SetTabNavigation(content, I.KeyboardNavigationMode.Cycle);
         I.KeyboardNavigation.SetDirectionalNavigation(content, I.KeyboardNavigationMode.Contained);
@@ -115,7 +116,8 @@ internal sealed partial class ProviderOverview
                 button.FontWeight = selected || current ? W.FontWeights.SemiBold : W.FontWeights.Normal;
                 if (selected) button.Background = UiTheme.Brush(_theme.Accent, 55);
                 else if (enabled && (monthly || date.Month == page.Month)) button.Background = UiTheme.Brush(_theme.Text, 12);
-                if (current) { button.BorderBrush = UiTheme.Brush(_theme.Text); button.BorderThickness = new(1); }
+                if (dateFocusCue is not null) button.FocusVisualStyle = dateFocusCue;
+                if (current) button.Content = new C.TextBlock { Text = caption, TextDecorations = W.TextDecorations.Underline };
                 cells.Children.Add(button);
                 if (!button.IsEnabled) continue;
                 firstEnabled ??= button;
@@ -200,7 +202,7 @@ internal sealed partial class ProviderOverview
             W.Automation.AutomationProperties.SetName(button, name);
             button.Background = palette[level].Fill;
             button.Foreground = palette[level].Ink;
-            button.BorderThickness = new(selected ? 1.5 : 0);
+            C.Primitives.Selector.SetIsSelected(button, selected);
             button.FontSize = 10;
             button.FontWeight = current || selected ? W.FontWeights.SemiBold : W.FontWeights.Normal;
             if (day is null && !_theme.HighContrast) button.Opacity = .52;

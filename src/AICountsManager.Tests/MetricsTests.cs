@@ -323,11 +323,21 @@ internal static partial class Program
             var above = Tile(today.AddDays(-7));
             var previousDay = today.AddDays(-1);
             UiClick(MetricButton(panel, "month-" + previousDay.DayNumber));
+            form.Visual.UpdateLayout();
             var todayButton = MetricButton(panel, "month-" + today.DayNumber);
-            Check(todayButton.BorderThickness == new W.Thickness(0) &&
-                ((C.TextBlock)todayButton.Content).TextDecorations == W.TextDecorations.Underline &&
-                MetricButton(panel, "month-" + previousDay.DayNumber).BorderThickness.Left > 0,
-                "Today and the selected date look like two selections.");
+            var selectedButton = MetricButton(panel, "month-" + previousDay.DayNumber);
+            static C.Border Mark(C.Button day) => (C.Border)day.Template.FindName("SelectionMark", day);
+            var mark = Mark(selectedButton);
+            Check(mark.IsVisible && mark.ActualHeight == 1 && mark.ActualWidth < left.Width &&
+                ((M.SolidColorBrush)mark.Background).Color == theme.Accent && Bounds(mark).Top >= Tile(previousDay).Bottom &&
+                !Mark(todayButton).IsVisible && ((C.TextBlock)todayButton.Content).TextDecorations == W.TextDecorations.Underline,
+                "The selected date needs a thin accent below its tile, distinct from today.");
+            var selectedTile = (C.Grid)selectedButton.Template.FindName("DayTile", selectedButton);
+            Check(selectedTile.Children.OfType<C.Border>().All(border => border.BorderThickness == new W.Thickness(0)),
+                "A selection or hover border surrounds the calendar number.");
+            UiClick(selectedButton);
+            form.Visual.UpdateLayout();
+            Check(!Mark(MetricButton(panel, "month-" + previousDay.DayNumber)).IsVisible, "Deselecting left a calendar mark.");
             Check(chosen.Width <= 20 && chosen.Height <= 16 && chosen.Left - left.Right >= 3 &&
                 chosen.Top - above.Bottom >= 3, "Calendar tiles or selection borders overlap.");
             var visible = MetricButtons(panel).Where(p => p.Key.StartsWith("month-")).Select(p => p.Value).ToArray();
@@ -347,7 +357,9 @@ internal static partial class Program
             var frame = OpenMetricPicker(panel);
             var button = PickerControl(frame, "date-" + new DateOnly(2026, 11, 1).DayNumber);
             Check(((M.SolidColorBrush)button.Foreground).Color == theme.Text &&
-                ((M.SolidColorBrush)frame.Background).Color == theme.Surface && button.Style is not null,
+                ((M.SolidColorBrush)frame.Background).Color == theme.Surface && button.Style is not null &&
+                button.BorderThickness == new W.Thickness(0) && button.Content is C.TextBlock { TextDecorations: var currentDateMark }
+                && currentDateMark == W.TextDecorations.Underline,
                 "The monthly selector did not inherit the app theme.");
         }
         return Task.CompletedTask;
@@ -443,6 +455,9 @@ internal static partial class Program
         var lightPanel = UiField<ProviderOverview>(light, "_overview");
         lightPanel.Select(UsageView.Calendar); light.Visual.UpdateLayout();
         SaveResetDemo(light.Visual, Path.Combine(output, "calendario-claro.png"), lightPanel);
+        UiClick(MetricButton(lightPanel, "month-" + date.AddDays(-1).DayNumber));
+        light.Visual.UpdateLayout();
+        SaveResetDemo(light.Visual, Path.Combine(output, "calendario-seleccion-claro.png"), lightPanel);
         SaveElement(OpenMetricPicker(lightPanel), Path.Combine(output, "selector-mes-claro.png"));
         lightPanel.ClosePicker();
         lightPanel.Select(UsageView.Week); light.Visual.UpdateLayout();
