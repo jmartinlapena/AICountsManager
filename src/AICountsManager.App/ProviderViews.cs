@@ -12,13 +12,11 @@ internal sealed class CurrentProviderCard : C.Border, IDisposable
     private readonly C.ContextMenu _menu = new();
     private readonly List<C.Button> _actions = [];
     private readonly AvailableResetsView _resets = new();
-    public event Action? HeightChanged;
-    internal double EstimatedHeight => (_account is null ? 130 : 74 + _account.Quotas.GroupBy(q => q.Group).Count() * 24 + _account.Quotas.Count * 46) + _resets.EstimatedHeight;
     public event Func<string, Task>? ActivateRequested, RenameRequested, DeleteRequested;
     public bool MenuOpen => _menu.IsOpen;
     public void SetBusy(bool busy) { foreach (var action in _actions) action.IsEnabled = !busy; if (busy) _menu.IsOpen = false; }
-    public void Dispose() { _menu.IsOpen = false; _menu.Items.Clear(); _menu.PlacementTarget = null; ActivateRequested = RenameRequested = DeleteRequested = null; HeightChanged = null; Child = null; }
-    public CurrentProviderCard(UiTheme theme) { _theme = theme; CornerRadius = new(11); Padding = new(12, 10, 12, 11); Margin = new(0, 0, 0, 8); BorderThickness = new(1); BorderBrush = M.Brushes.Transparent; _resets.HeightChanged += () => HeightChanged?.Invoke(); }
+    public void Dispose() { _menu.IsOpen = false; _menu.Items.Clear(); _menu.PlacementTarget = null; ActivateRequested = RenameRequested = DeleteRequested = null; Child = null; }
+    public CurrentProviderCard(UiTheme theme) { _theme = theme; CornerRadius = new(11); Padding = new(12, 10, 12, 11); Margin = new(0, 0, 0, 8); BorderThickness = new(1); BorderBrush = M.Brushes.Transparent; }
     public void SetTheme(UiTheme theme) { _theme = theme; if (_account is not null) Update(_account); }
     public void Update(ProviderUsage account)
     {

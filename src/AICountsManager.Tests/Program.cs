@@ -9,6 +9,8 @@ internal static partial class Program
 {
     private static readonly (string Name, Func<Task> Run)[] Tests =
     [
+        ("metrics cards fit their content and the sole provider remains collapsible", MetricsCompactAsync),
+        ("metrics calendar distinguishes realistic daily totals across the retained history", MetricsHeatAsync),
         ("metrics distinguish partial coverage and handle retained cross-year periods", MetricsCoverageAsync),
         ("metrics navigation has no I/O and F5 preserves the shared week", MetricsNavigationIoAsync),
         ("metrics selectors use readable themes and Codex owns its colors", MetricsAppearanceAsync),

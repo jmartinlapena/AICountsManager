@@ -30,6 +30,7 @@ internal sealed class WidgetForm : IDisposable
     private readonly bool _clockEnabled;
     private CancellationTokenSource? _historyCancellation;
 
+    private bool _trayLayout;
     private bool _busy, _applying, _settingsVisible, _dialogOpen;
     private string? _transientNotice;
     private Interop.HwndSource? _source;
@@ -94,6 +95,10 @@ internal sealed class WidgetForm : IDisposable
             }
         };
 
+        _window.SizeChanged += (_, e) =>
+        {
+            if (_trayLayout && Visible && e.HeightChanged) AnchorToTray();
+        };
         _window.Closing += (_, e) => { if (!IsDisposed) { e.Cancel = true; _window.Hide(); } };
         System.Windows.Forms.Integration.ElementHost.EnableModelessKeyboardInterop(_window);
         _window.SourceInitialized += (_, _) =>
@@ -162,7 +167,7 @@ internal sealed class WidgetForm : IDisposable
             TimeZoneInfo.ClearCachedData();
             if (Visible) { RefreshState(); if (!_settingsVisible) _overview.RenderPending(); }
         });
-        if (message is 0x001A or 0x031A) BeginInvoke(() =>
+        if (message is 0x001A or 0x031A or 0x0320) BeginInvoke(() =>
         {
             var next = _fixedTheme ?? UiTheme.Read();
             // Setting the DWM dark-mode attribute can itself emit WM_THEMECHANGED.
@@ -195,21 +200,19 @@ internal sealed class WidgetForm : IDisposable
         WindowMaterial.Position(Handle, screen.Right - 382, screen.Bottom - 510);
         var dpi = WindowMaterial.Dpi(Handle) / 96d;
         _window.Width = Math.Min(382, Math.Max(280, screen.Width / dpi - 24));
-        UpdateWindowHeight(screen, dpi);
-        _window.Show(); _window.Activate();
+        _trayLayout = true;
+        _window.MaxHeight = Math.Min(740, Math.Max(1, screen.Height / dpi - 24));
+        _window.SizeToContent = W.SizeToContent.Height;
+        _window.Show();
+        AnchorToTray();
+        _window.Activate();
         _ = UpdateHistoryAsync();
     }
-    private void UpdateWindowHeight(System.Drawing.Rectangle? workingArea = null, double? dpiScale = null)
+    private void AnchorToTray()
     {
-        var screen = workingArea ?? Screen.FromHandle(Handle).WorkingArea;
-        var dpi = dpiScale ?? (WindowMaterial.Dpi(Handle) / 96d);
-        var cardsHeight = _rows.Values.Sum(row => row.EstimatedHeight) + _externalRows.Values.Sum(card => card.EstimatedHeight);
-        var bannerHeight = Find<C.Border>("WarningBanner").Visibility == W.Visibility.Visible ? 44 : 0;
-        var desired = Math.Max(440, Math.Min(740, 352 + cardsHeight + bannerHeight));
-        var height = Math.Min(desired, screen.Height / dpi - 24);
-        if (workingArea is null && _window.Height == height) return;
-
-        _window.Height = height;
+        var screen = Screen.FromHandle(Handle).WorkingArea;
+        var dpi = WindowMaterial.Dpi(Handle) / 96d;
+        var height = _window.ActualHeight;
         var left = Math.Max(screen.Left, screen.Right - (int)Math.Ceiling(_window.Width * dpi) - 12);
         var top = Math.Max(screen.Top, screen.Bottom - (int)Math.Ceiling(height * dpi) - 12);
         WindowMaterial.Position(Handle, left, top);
@@ -230,7 +233,6 @@ internal sealed class WidgetForm : IDisposable
                 {
                     row = new AccountRow(_theme);
                     row.ActivateRequested += SwitchAsync; row.RenameRequested += RenameAsync; row.DeleteRequested += DeleteAsync;
-                    row.HeightChanged += () => { if (Visible) UpdateWindowHeight(); };
                     _rows.Add(profile.Name, row);
                 }
                 row.Update(profile, _busy);
@@ -249,7 +251,6 @@ internal sealed class WidgetForm : IDisposable
                 {
                     card = new CurrentProviderCard(_theme);
                     card.ActivateRequested += ClaudeSwitchAsync; card.RenameRequested += ClaudeRenameAsync; card.DeleteRequested += ClaudeDeleteAsync;
-                    card.HeightChanged += () => { if (Visible) UpdateWindowHeight(); };
                     _externalRows[key] = card;
                 }
                 card.Update(other); card.SetBusy(_busy);
@@ -265,7 +266,6 @@ internal sealed class WidgetForm : IDisposable
             Find<C.CheckBox>("StrictToggle").IsChecked = state.StrictVerification;
             Find<C.CheckBox>("StartupToggle").IsChecked = _service.StartupShortcutExists();
             UpdateWarningBanner(state.CodexBinaryMissing);
-            if (Visible) UpdateWindowHeight();
             UpdateFooter(state);
             if (_settingsVisible) UpdateOrderList();
             Find<C.TextBlock>("CountLabel").Text = $"{state.Profiles.Count + (state.OtherAccounts?.Count ?? 0)} cuentas";
@@ -290,6 +290,16 @@ internal sealed class WidgetForm : IDisposable
     }
     internal void ShowSettings(bool show)
     {
+        if (_trayLayout && show != _settingsVisible)
+        {
+            if (show)
+            {
+                var height = _window.ActualHeight;
+                _window.SizeToContent = W.SizeToContent.Manual;
+                _window.Height = height;
+            }
+            else _window.SizeToContent = W.SizeToContent.Height;
+        }
         _settingsVisible = show;
         if (show) { _overview.ClosePicker(); UpdateOrderList(); }
         UpdateViews();
@@ -538,8 +548,6 @@ internal sealed class AccountRow : C.Border, IDisposable
     private readonly C.Border _planBadge = new() { CornerRadius = new W.CornerRadius(4), Padding = new W.Thickness(5, 2, 5, 2), Margin = new W.Thickness(6, 0, 0, 0), VerticalAlignment = W.VerticalAlignment.Center };
     private readonly C.StackPanel[] _quotaSections = [new(), new()];
     private readonly AvailableResetsView _resets = new();
-    public event Action? HeightChanged;
-    internal double EstimatedHeight => (_profile?.SessionLimitNotApplicable == true ? 122 : 174) + _resets.EstimatedHeight;
     private readonly C.TextBlock _name = Text(13, true), _email = Text(10), _badge = Text(10, true), _updated = Text(9.5), _notice = Text(10);
     private readonly C.Button _activate = new() { Content = "Activar", FontSize = 10, Padding = new W.Thickness(9, 3, 9, 3), MinHeight = 24 }, _more = new() { Content = "\uE712", FontFamily = new M.FontFamily("Segoe Fluent Icons"), Width = 24, MinHeight = 24, Padding = new W.Thickness(0) };
     private readonly C.ContextMenu _menu = new();
@@ -570,7 +578,7 @@ internal sealed class AccountRow : C.Border, IDisposable
         var status = new C.StackPanel { Margin = new W.Thickness(6, 0, 9, 0), VerticalAlignment = W.VerticalAlignment.Center };
         _badge.HorizontalAlignment = _updated.HorizontalAlignment = W.HorizontalAlignment.Right; status.Children.Add(_badge); status.Children.Add(_updated); status.Children.Add(_activate);
         C.Grid.SetColumn(status, 1); header.Children.Add(status); C.Grid.SetColumn(_more, 2); header.Children.Add(_more); stack.Children.Add(header);
-        stack.Children.Add(_resets); _resets.HeightChanged += () => HeightChanged?.Invoke();
+        stack.Children.Add(_resets);
         _activate.Click += async (_, _) => { if (_profile is { } p && ActivateRequested is { } action) await action(p.Name); };
         _more.Click += (_, _) => { _menu.PlacementTarget = _more; _menu.IsOpen = true; };
         W.Automation.AutomationProperties.SetName(_more, "Opciones de la cuenta");
@@ -657,7 +665,6 @@ internal sealed class AccountRow : C.Border, IDisposable
         if (IsDisposed) return;
         IsDisposed = true; _menu.IsOpen = false; _menu.Items.Clear(); _menu.PlacementTarget = null;
         ActivateRequested = RenameRequested = DeleteRequested = null; Child = null;
-        HeightChanged = null;
     }
 }
 
@@ -668,6 +675,12 @@ internal sealed record UiTheme(bool Dark, bool Transparency, bool HighContrast, 
     public M.Color Text => HighContrast ? W.SystemColors.WindowTextColor : Dark ? M.Color.FromRgb(243, 245, 247) : M.Color.FromRgb(28, 32, 37);
     public M.Color Muted => HighContrast ? Text : Dark ? M.Color.FromRgb(173, 182, 190) : M.Color.FromRgb(83, 95, 104);
     private M.Color RawAccent => SystemAccent ?? M.Color.FromRgb(0, 120, 212);
+    // Tint the native acrylic with the user's actual accent in both views.
+    // Keep the shell dark/light enough for text even with a very bright/dark accent.
+    internal M.Color AcrylicTint => M.Color.FromRgb(TintChannel(Surface.R, RawAccent.R),
+        TintChannel(Surface.G, RawAccent.G), TintChannel(Surface.B, RawAccent.B));
+    private byte TintChannel(byte surface, byte accent) =>
+        (byte)Math.Round(surface + (accent - surface) * (Dark ? .46 : .26));
     private M.Color Shade(double mix) => M.Color.FromRgb((byte)(RawAccent.R * (1 - mix) + (Dark ? 255 : 0) * mix), (byte)(RawAccent.G * (1 - mix) + (Dark ? 255 : 0) * mix), (byte)(RawAccent.B * (1 - mix) + (Dark ? 255 : 0) * mix));
     public M.Color Accent => HighContrast ? W.SystemColors.HighlightColor : Shade(Dark ? .48 : .18);
     public M.Color Warning => HighContrast ? Text : Dark ? M.Color.FromRgb(231, 189, 116) : M.Color.FromRgb(144, 88, 18);
@@ -684,7 +697,7 @@ internal sealed record UiTheme(bool Dark, bool Transparency, bool HighContrast, 
     {
         resources["Text"] = Brush(Text); resources["Muted"] = Brush(Muted); resources["Accent"] = Brush(Accent);
         resources["ToggleKnob"] = HighContrast ? W.SystemColors.HighlightTextBrush : Brush(Dark ? Base : M.Colors.White);
-        resources["ShellTint"] = acrylic && !HighContrast ? M.Brushes.Transparent : Brush(Base);
+        resources["ShellTint"] = acrylic && !HighContrast ? Brush(AcrylicTint, 166) : Brush(Base);
         resources["OverlayBackground"] = Brush(Surface);
         resources["OverlayEdge"] = Brush(HighContrast ? Text : Dark ? M.Color.FromRgb(70, 73, 79) : M.Color.FromRgb(197, 204, 211));
         resources["CardBg"] = Brush(Dark ? M.Colors.White : M.Colors.Black, (byte)10);
@@ -699,19 +712,13 @@ internal sealed record UiTheme(bool Dark, bool Transparency, bool HighContrast, 
             // Taskbar theme can differ from the apps theme: intentionally use SystemUsesLightTheme.
             var dark = settings?.GetValue("SystemUsesLightTheme") is not int light || light == 0;
             var transparent = settings?.GetValue("EnableTransparency") is int enabled && enabled == 1;
-            M.Color? tint = null, systemAccent = null;
-            using (var colors = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"))
-                if (colors?.GetValue("AccentColorMenu") is int color)
-                    systemAccent = M.Color.FromRgb((byte)(color & 255), (byte)((color >> 8) & 255), (byte)((color >> 16) & 255));
-            if (settings?.GetValue("ColorPrevalence") is int prevalence && prevalence == 1)
-            {
-                using var accent = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent");
-                if (accent?.GetValue("AccentColorMenu") is int raw)
-                {
-                    // Explorer stores its accent as ABGR. Darken it to the taskbar material base.
-                    tint = M.Color.FromRgb((byte)((raw & 255) * 0.55), (byte)(((raw >> 8) & 255) * 0.55), (byte)(((raw >> 16) & 255) * 0.55));
-                }
-            }
+            using var colors = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent");
+            // Explorer's menu colors are COLORREF (low byte red), not ARGB.
+            static M.Color? ReadColor(object? value) => value is int raw
+                ? M.Color.FromRgb((byte)raw, (byte)(raw >> 8), (byte)(raw >> 16)) : null;
+            var systemAccent = ReadColor(colors?.GetValue("AccentColorMenu")) ?? W.SystemParameters.WindowGlassColor;
+            var tint = dark && settings?.GetValue("ColorPrevalence") is 1
+                ? ReadColor(colors?.GetValue("StartColorMenu")) : null;
             return new UiTheme(dark, transparent, W.SystemParameters.HighContrast, tint, systemAccent);
         }
         catch { return new UiTheme(true, false, W.SystemParameters.HighContrast); }

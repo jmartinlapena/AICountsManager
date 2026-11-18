@@ -57,6 +57,11 @@ internal static partial class Program
         Check(panel.SelectedDay == today && panel.DisplayedPeriod.Total == weeklyTotal
             && MetricText(panel).Contains("146.800 tokens"), "A week day selection replaced the week total or lost the exact number.");
         Check(!MetricButton(panel, "week-" + today.AddDays(1).DayNumber).IsEnabled, "A future day can be selected.");
+        UiClick(MetricButton(panel, "week-models"));
+        Check(MetricText(panel).Contains("Claude Sonnet") && MetricText(panel).Contains("GPT")
+            && MetricText(panel).Contains("42.400"), "Weekly model details lost the selected day or provider.");
+        UiClick(MetricButton(panel, "week-models"));
+        Check(!MetricText(panel).Contains("Claude Sonnet"), "Weekly model disclosure cannot be closed.");
         var focusBorder = MetricButton(panel, thisDay).BorderBrush;
         Check(focusBorder is M.SolidColorBrush b && b.Color.A > 0, "Selected week column has no visual outline.");
         UiClick(weekCell);
@@ -73,7 +78,7 @@ internal static partial class Program
         panel.Update(data with { });
         panel.SetTheme(theme with { Dark = false });
         panel.Select(UsageView.Quotas);
-        Check(panel.DisplayedPeriod.Total == 980_800 && MetricText(panel).Contains("980.800"), "The new view lost the chosen week or abbreviated its total.");
+        Check(panel.DisplayedPeriod.Total == 980_800 && MetricText(panel).Contains("981") && MetricText(panel).Contains("mil"), "The ring lost the selected week or its compact units.");
         panel.Select(UsageView.Week);
         Check(panel.SelectedDay == wed, "Weekly date selection was not restored.");
         UiClick(MetricButton(panel, "current"));
@@ -94,6 +99,88 @@ internal static partial class Program
         return Task.CompletedTask;
     });
 
+    private static Task MetricsCompactAsync() => InTemporaryStoreAsync(paths => RunOnUiThreadAsync(async () =>
+    {
+        // November 2026 spans six calendar rows. Compare all tabs on the same single-provider account.
+        var today = new DateOnly(2026, 11, 17);
+        using var service = CreateService(paths);
+        using var form = new WidgetForm(service, new UiTheme(true, false, false), false, () => today);
+        form.ShowNearTray();
+        await EventuallyAsync(() => Task.FromResult(!UiField<bool>(form, "_historyReading")));
+        var profile = SampleProfile("Personal", true) with { Resets = InventoryFixture(1) };
+        form.ApplyState(SampleState() with { Profiles = [profile], ActiveProfile = profile, OtherAccounts = [] });
+        var panel = UiField<ProviderOverview>(form, "_overview");
+        var snapshot = MetricsSnapshot(today, [(today, "gpt", 656_234_567L), (today.AddDays(-10), "gpt", 44_000_000L),
+            (today.AddMonths(-1), "gpt", 24_000_000L), (today.AddMonths(-2), "gpt", 2_000_000L)]);
+        panel.Update(snapshot);
+        double Height()
+        {
+            form.Visual.UpdateLayout();
+            form.Visual.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return panel.ActualHeight;
+        }
+        var target = Height();
+        var windowHeight = form.Visual.ActualHeight;
+        var toggle = "provider-" + ProviderIds.Codex;
+        Check(MetricText(panel).Contains("gpt"), "The sole provider has no initial models.");
+        UiClick(MetricButton(panel, toggle));
+        var folded = Height();
+        Console.WriteLine($"Single provider expanded={target}, folded={folded}, window={windowHeight}/{form.Visual.ActualHeight} DIP");
+        Check(folded <= target - 15 && form.Visual.ActualHeight < windowHeight, "Closing the only provider left unused card or window space.");
+        panel.Update(snapshot with { });
+        Check(!MetricText(panel).Contains("gpt"), "Refresh reopened the sole provider's models.");
+        foreach (var view in new[] { UsageView.Week, UsageView.Quotas, UsageView.Calendar })
+        {
+            panel.Select(view);
+            var height = Height();
+            Console.WriteLine($"Compact card {view}={height} DIP, Today={target} DIP");
+            Check(height <= target + 38 && height <= 210, $"The {view} card differs from Today by {height - target} DIP.");
+        }
+        panel.Select(UsageView.Quotas);
+        Check(MetricText(panel).Contains("656") && MetricText(panel).Contains("millones")
+            && Descendants(panel).OfType<C.Grid>().Any(g => W.Automation.AutomationProperties.GetName(g) == "656.234.567 tokens"),
+            "Large ring totals should fit and retain an exact accessible value.");
+        panel.Select(UsageView.Week);
+        Check(MetricText(panel).Contains("656.234.567") && MetricText(panel).Contains("tokens"), "The weekly headline lost the exact total or inline unit.");
+        panel.Select(UsageView.Today);
+        UiClick(MetricButton(panel, toggle));
+        Check(MetricText(panel).Contains("gpt"), "The sole provider cannot be reopened.");
+        var inventoryView = UiField<AvailableResetsView>(form.Rows.Single(), "_resets");
+        var reset = UiField<C.Button>(inventoryView, "_toggle");
+        reset.Focus();
+        Height();
+        var plate = (C.Border)reset.Template.FindName("Plate", reset);
+        Check(reset.FocusVisualStyle is not null && plate.BorderThickness == new W.Thickness(0) &&
+            reset.ActualWidth < inventoryView.ActualWidth - 10 && reset.ActualHeight <= 21,
+            "The reset disclosure stretches across the card or its focus border crowds the text.");
+        var beforeResets = form.Visual.ActualHeight;
+        UiClick(reset);
+        Height();
+        Check(form.Visual.ActualHeight > beforeResets, "The window did not fit expanded resets.");
+        UiClick(reset);
+        Height();
+        Check(Math.Abs(form.Visual.ActualHeight - beforeResets) <= 1, "Collapsing resets left unused window space.");
+        form.ShowSettings(true);
+        Height();
+        Check(Math.Abs(form.Visual.ActualHeight - beforeResets) <= 1, "Opening settings moved the fitted tray window.");
+    }));
+
+    private static Task MetricsHeatAsync()
+    {
+        var today = new DateOnly(2026, 11, 17);
+        var current = MetricsSnapshot(today, [(today, "gpt", 8_000_000L), (today.AddDays(-1), "gpt", 4_000_000L),
+            (today.AddDays(-30), "gpt", 1_000_000L), (today.AddDays(-31), "gpt", 3_000_000L),
+            (today.AddDays(1), "future", 9_999_999_999L), (MetricsPeriods.Cutoff(today).AddDays(-1), "old", 1L)]);
+        var other = MetricsSnapshot(today, [(today.AddDays(-30), "claude", 1_000_000L)]);
+        var history = new MetricsHistory(ProviderHistory.Merge(new Dictionary<string, TokenHistorySnapshot>
+            { [ProviderIds.Codex] = current, [ProviderIds.Claude] = other }), today);
+        int[] levels = [history.Heat(0), history.Heat(2_000_000), history.Heat(3_000_000), history.Heat(4_000_000), history.Heat(8_000_000)];
+        Check(levels.SequenceEqual([0, 1, 2, 3, 4]), "Million-token days saturated the calendar or used per-provider/per-month thresholds.");
+        var tied = new MetricsHistory(MetricsSnapshot(today, [(today, "m", 500L), (today.AddDays(-1), "m", 500L)]), today);
+        Check(tied.Heat(500) == 2 && tied.Heat(0) == 0, "Identical positive days should have one neutral intensity.");
+        return Task.CompletedTask;
+    }
+
     private static Task MetricsCoverageAsync() => RunOnUiThreadAsync(() =>
     {
         var today = new DateOnly(2027, 1, 5);
@@ -106,6 +193,7 @@ internal static partial class Program
         var panel = new ProviderOverview(new UiTheme(true, false, false), () => today);
         panel.Update(merged);
         Check(!panel.DisplayedPeriod.HasKnownTotal && MetricText(panel).Contains("—"), "Cursor missing coverage became today's zero.");
+        Check(!MetricText(panel).Any(t => t.Contains("Cobertura incompleta") || t.Contains("Historial parcial")), "A redundant coverage banner is visible.");
         var history = new MetricsHistory(merged, today);
         Check(history.Read(cursorDay, cursorDay, today).HasKnownTotal && history.Read(cursorDay, cursorDay, today).Total == 0,
             "A fully observed zero was hidden.");
@@ -254,7 +342,7 @@ internal static partial class Program
         using var service = CreateService(paths);
         foreach (var (transparency, contrast) in new[] { (true, false), (false, false), (true, true) })
         {
-            var theme = new UiTheme(true, transparency, contrast);
+            var theme = new UiTheme(true, transparency, contrast, SystemAccent: M.Colors.DodgerBlue);
             using var form = new WidgetForm(service, theme, false);
             form.ApplyState(SampleState());
             form.Visual.Topmost = false; form.Visual.Left = form.Visual.Top = -20000;
@@ -263,8 +351,8 @@ internal static partial class Program
             var brush = (M.SolidColorBrush)shell.Background;
             var backdrop = WindowMaterial.ReadBackdrop(form.Handle);
             if (form.AcrylicEnabled)
-                Check(brush.Color.A == 0 && ((M.SolidColorBrush)form.Visual.Background).Color.A == 0 && backdrop == 3 && transparency && !contrast,
-                    "The outer shell still tints enabled DWM acrylic or used the wrong material.");
+                Check(brush.Color.A is > 0 and < 255 && brush.Color.B > brush.Color.R && ((M.SolidColorBrush)form.Visual.Background).Color.A == 0 && backdrop == 3 && transparency && !contrast,
+                    "The shell lost the translucent Windows accent or its native DWM material.");
             else
                 Check(brush.Color == theme.Base, "The window did not fall back to the accessible solid background.");
             var bounds = (form.Visual.Left, form.Visual.Top, form.Visual.Width, form.Visual.Height);

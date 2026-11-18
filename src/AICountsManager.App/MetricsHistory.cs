@@ -43,12 +43,15 @@ internal sealed class MetricsHistory
     }
 
     private readonly Source[] _sources;
+    private readonly DateOnly _today;
+    private decimal[]? _heatThresholds;
     private readonly bool _incomplete;
     private readonly bool _catchingUp;
     public static CultureInfo Culture { get; } = CultureInfo.GetCultureInfo("es-ES");
 
     public MetricsHistory(TokenHistorySnapshot snapshot, DateOnly today)
     {
+        _today = today;
         _catchingUp = snapshot.CatchingUp;
         _incomplete = snapshot.Partial || _catchingUp || snapshot.Error is not null;
         var sources = snapshot.Sources ?? new Dictionary<string, TokenHistorySnapshot> { [ProviderIds.Codex] = snapshot };
@@ -101,15 +104,33 @@ internal sealed class MetricsHistory
             .Where(m => m.Value > 0).Select(m => new ModelTokens(m.Key, m.Value))
             .OrderByDescending(m => m.Tokens).ThenBy(m => m.Name, StringComparer.Ordinal).ToArray() ?? [];
 
-    // Fixed thresholds keep the same color for the same total across months.
-    public static int Heat(decimal total) => total switch
+    // One scale for every month in the snapshot. Only the calendar needs the distribution.
+    public int Heat(decimal total)
     {
-        <= 0 => 0,
-        <= 50_000 => 1,
-        <= 100_000 => 2,
-        <= 170_000 => 3,
-        _ => 4,
-    };
+        if (total <= 0) return 0;
+        _heatThresholds ??= HeatThresholds();
+        if (_heatThresholds.Length == 0) return 2;
+        if (total <= _heatThresholds[0]) return 1;
+        if (total <= _heatThresholds[1]) return 2;
+        return total <= _heatThresholds[2] ? 3 : 4;
+    }
+
+    private decimal[] HeatThresholds()
+    {
+        var cutoff = MetricsPeriods.Cutoff(_today);
+        var totals = _sources.SelectMany(source => source.Days)
+            .Where(day => day.Key >= cutoff && day.Key <= _today && day.Value.Total > 0)
+            .GroupBy(day => day.Key).Select(group => group.Sum(day => (decimal)day.Value.Total))
+            .Distinct().Order().ToArray();
+        if (totals.Length < 2) return [];
+        decimal Quartile(int quarter)
+        {
+            var position = (totals.Length - 1) * quarter / 4m;
+            var lower = (int)position;
+            return totals[lower] + (totals[lower + 1] - totals[lower]) * (position - lower);
+        }
+        return [Quartile(1), Quartile(2), Quartile(3)];
+    }
 
     public static string Number(decimal total) => total.ToString("N0", Culture);
 

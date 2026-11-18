@@ -31,7 +31,7 @@ Referencias de protocolo: [cliente oficial de Codex](https://github.com/openai/c
 
 Se amplían `cache/usage_cache.json` y `cache/claude-accounts.json` con metadatos opcionales. No se guardan respuestas completas ni identificadores de canje. La sesión de Claude todavía no registrada tiene una entrada reservada vinculada al hash de la sesión; no se reutiliza para una sesión distinta. Una caché antigua sin estos campos sigue siendo válida y un bloque de resets ilegible no invalida las cuotas.
 
-Las fechas absolutas se normalizan a UTC. La presentación convierte cada caducidad mediante `TimeZoneInfo.Local` e incluye el desplazamiento correspondiente a esa fecha, también en verano. `WM_TIMECHANGE` y `WM_SETTINGCHANGE` invalidan la caché de zona horaria y refrescan el panel visible. No se añade ningún temporizador, dependencia o proceso auxiliar. Se reutiliza el reloj existente del panel, detenido cuando está oculto.
+Las fechas absolutas se normalizan a UTC. La presentación convierte cada caducidad mediante `TimeZoneInfo.Local` y muestra la fecha y la hora con el horario de verano o invierno que corresponde. `WM_TIMECHANGE` y `WM_SETTINGCHANGE` invalidan la caché de zona horaria y refrescan el panel visible. No se añade ningún temporizador, dependencia o proceso auxiliar. Se reutiliza el reloj existente del panel, detenido cuando está oculto.
 
 ## Validación y demostración
 

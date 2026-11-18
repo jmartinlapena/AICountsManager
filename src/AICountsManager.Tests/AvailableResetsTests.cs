@@ -191,6 +191,7 @@ internal static partial class Program
             {
                 Check(view.Visibility == W.Visibility.Visible && !view.Expanded, "Reset row must begin collapsed.");
                 UiClick(UiField<C.Button>(view, "_toggle"));
+                Check(!Descendants(view).OfType<C.TextBlock>().Any(t => t.Text.Contains("hora local", StringComparison.OrdinalIgnoreCase)), "An extra time-zone caption occupies a row.");
                 Check(view.Expanded && UiField<C.StackPanel>(view, "_details").Children.Count > 0 && view.ToolTip is null && !view.HasAnimatedProperties, "Disclosure did not show local data or introduced hover/animation.");
             }
             codex.Update(profile, false); claude.Update(other);
@@ -200,10 +201,10 @@ internal static partial class Program
         }
         var zone = TimeZoneInfo.FindSystemTimeZoneById("Romance Standard Time");
         var reset = new AvailableReset("full", "Reset", "", 1, DateTimeOffset.Parse("2026-12-10T22:00:00Z"));
-        Check(AvailableResetsView.ExpiryLabel(reset, zone).Contains("23:00") && AvailableResetsView.ExpiryLabel(reset, zone).Contains("+01:00"), "Winter local expiration is wrong.");
+        Check(AvailableResetsView.ExpiryLabel(reset, zone).EndsWith(", 23:00", StringComparison.Ordinal), "Winter local expiration is wrong.");
         reset = reset with { ExpiresAtUtc = DateTimeOffset.Parse("2027-06-10T22:00:00Z") };
-        Check(AvailableResetsView.ExpiryLabel(reset, zone).Contains("00:00") && AvailableResetsView.ExpiryLabel(reset, zone).Contains("+02:00"), "Summer expiration did not cross into the next local day.");
-        Check(AvailableResetsView.ExpiryLabel(reset, TimeZoneInfo.Utc).Contains("22:00"), "Zone was fixed or cached in the presentation.");
+        Check(AvailableResetsView.ExpiryLabel(reset, zone) == new DateTime(2027, 6, 11).ToString("d MMM yyyy, HH:mm"), "Summer expiration did not cross into the next local day.");
+        Check(AvailableResetsView.ExpiryLabel(reset, TimeZoneInfo.Utc).EndsWith(", 22:00", StringComparison.Ordinal), "Zone was fixed or cached in the presentation.");
         return Task.CompletedTask;
     });
 

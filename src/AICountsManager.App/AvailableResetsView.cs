@@ -8,24 +8,24 @@ namespace AICountsManager;
 // Shared by every provider. Expanding only reveals local metadata; it never starts a request or a timer.
 internal sealed class AvailableResetsView : C.StackPanel
 {
-    private readonly C.Button _toggle = new() { Padding = new(0, 4, 0, 4), MinHeight = 26,
+    private readonly C.Button _toggle = new() { Padding = new(2, 1, 3, 1), MinHeight = 19,
+        HorizontalAlignment = W.HorizontalAlignment.Left,
         HorizontalContentAlignment = W.HorizontalAlignment.Stretch, Background = M.Brushes.Transparent, BorderThickness = new(0) };
     private readonly C.TextBlock _label = new() { FontSize = 10.5, TextTrimming = W.TextTrimming.CharacterEllipsis };
-    private readonly C.TextBlock _arrow = new() { FontFamily = new M.FontFamily("Segoe Fluent Icons"), FontSize = 10,
+    private readonly C.TextBlock _arrow = new() { FontFamily = new M.FontFamily("Segoe Fluent Icons"), FontSize = 8, Margin = new(5, 0, 0, 0),
         HorizontalAlignment = W.HorizontalAlignment.Right, VerticalAlignment = W.VerticalAlignment.Center };
-    private readonly C.StackPanel _details = new() { Margin = new(0, 2, 0, 8), Visibility = W.Visibility.Collapsed };
+    private readonly C.StackPanel _details = new() { Margin = new(4, 1, 0, 3), Visibility = W.Visibility.Collapsed };
     private ResetInventory? _inventory;
     private UiTheme _theme = new(true, false, false);
     private bool _expanded;
-    public event Action? HeightChanged;
     internal bool Expanded => _expanded;
-    internal double EstimatedHeight => Visibility != W.Visibility.Visible ? 0 : 28 + (_expanded ? _details.Children.Count * 32 + 12 : 0);
+
 
     public AvailableResetsView()
     {
         var heading = new C.Grid(); heading.ColumnDefinitions.Add(new()); heading.ColumnDefinitions.Add(new() { Width = W.GridLength.Auto });
         heading.Children.Add(_label); C.Grid.SetColumn(_arrow, 1); heading.Children.Add(_arrow); _toggle.Content = heading;
-        _toggle.Click += (_, _) => { SetExpanded(!_expanded); HeightChanged?.Invoke(); };
+        _toggle.Click += (_, _) => SetExpanded(!_expanded);
         Children.Add(_toggle); Children.Add(_details); Visibility = W.Visibility.Collapsed;
     }
     internal void SetExpanded(bool expanded)
@@ -61,7 +61,7 @@ internal sealed class AvailableResetsView : C.StackPanel
     {
         if (reset.ExpiresAtUtc is not { } expiry) return reset.ExpiryKnown ? "Sin caducidad" : "Caducidad no informada";
         var local = TimeZoneInfo.ConvertTime(expiry, zone ?? TimeZoneInfo.Local);
-        return local.ToString("d MMM yyyy, HH:mm", CultureInfo.CurrentCulture) + " (" + local.ToString("zzz", CultureInfo.InvariantCulture) + ")";
+        return local.ToString("d MMM yyyy, HH:mm", CultureInfo.CurrentCulture);
     }
     private void RenderDetails()
     {
@@ -70,20 +70,18 @@ internal sealed class AvailableResetsView : C.StackPanel
         var items = _inventory.ActiveItems(DateTimeOffset.UtcNow);
         foreach (var item in items)
         {
-            var row = new C.Grid { Margin = new(0, 4, 0, 4) };
-            row.ColumnDefinitions.Add(new()); row.ColumnDefinitions.Add(new() { Width = new W.GridLength(150) });
+            var row = new C.Grid { Margin = new(0, 1, 0, 2) };
+            row.ColumnDefinitions.Add(new()); row.ColumnDefinitions.Add(new() { Width = W.GridLength.Auto });
             var identity = new C.StackPanel { Margin = new(0, 0, 6, 0) };
             identity.Children.Add(Text($"{item.Count} × {item.Label}", 10.5, _theme.Text));
             if (item.Scope.Length != 0) identity.Children.Add(Text(item.Scope, 9.5, _theme.Muted));
             if (item.UsableNow == false) identity.Children.Add(Text("No utilizable todavía", 9.5, _theme.Muted));
             row.Children.Add(identity);
-            var expiry = new C.StackPanel { HorizontalAlignment = W.HorizontalAlignment.Right };
-            if (item.ExpiresAtUtc is not null) expiry.Children.Add(Text("Caduca", 9.5, _theme.Muted, true));
-            expiry.Children.Add(Text(ExpiryLabel(item), 9.5, _theme.Muted, true));
+            var expiry = Text(ExpiryLabel(item), 9.5, _theme.Muted, true);
+            expiry.VerticalAlignment = W.VerticalAlignment.Top;
             C.Grid.SetColumn(expiry, 1); row.Children.Add(expiry); _details.Children.Add(row);
         }
         if (!_inventory.DetailsComplete) _details.Children.Add(Text("Detalle pendiente de actualizar", 9.5, _theme.Muted));
-        if (items.Count > 0) _details.Children.Add(Text("Hora local de Windows", 9.5, _theme.Muted));
         if (_inventory.Status == "stale") _details.Children.Add(Text("Última consulta: " + TimeZoneInfo.ConvertTime(_inventory.CheckedAtUtc, TimeZoneInfo.Local)
             .ToString("g", CultureInfo.CurrentCulture), 9.5, _theme.Muted));
     }

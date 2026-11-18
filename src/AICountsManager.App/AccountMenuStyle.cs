@@ -30,7 +30,6 @@ internal static class AccountMenuStyle
                   </Border>
                   <ControlTemplate.Triggers>
                     <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Item" Property="Background" Value="{DynamicResource Hover}"/></Trigger>
-                    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Item" Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
                     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
                   </ControlTemplate.Triggers>
                 </ControlTemplate>

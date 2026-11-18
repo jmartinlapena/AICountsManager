@@ -16,12 +16,12 @@ internal sealed partial class ProviderOverview : C.Border
     private readonly C.StackPanel _root = new(), _content = new();
     private readonly C.Border _tabsShell = new() { CornerRadius = new(9), Padding = new(3) };
     private readonly C.Button _today = Tab("Hoy"), _week = Tab("Semana"), _quotas = Tab("Cuotas"), _calendar = Tab("Calendario");
-    private readonly HashSet<string> _expandedProviders = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, bool> _modelExpansion = new(StringComparer.Ordinal);
     private readonly Dictionary<string, C.Button> _buttons = new(StringComparer.Ordinal);
     private C.Primitives.Popup? _picker;
     private TokenHistorySnapshot _snapshot = TokenHistorySnapshot.Empty;
     private MetricsHistory? _history;
-    private DateOnly? _lastRenderDate, _weekStart, _monthStart, _selectedWeekDay, _selectedMonthDay;
+    private DateOnly? _lastRenderDate, _weekStart, _monthStart, _selectedWeekDay, _selectedMonthDay, _expandedWeekModels;
     private bool _dirty = true, _rankingExpanded;
 
     public UsageView SelectedView { get; private set; } = UsageView.Today;
@@ -38,7 +38,7 @@ internal sealed partial class ProviderOverview : C.Border
         _theme = theme;
         _todayDate = today ?? (() => DateOnly.FromDateTime(DateTime.Today));
         CornerRadius = new(13);
-        Padding = new(12, 9, 12, 12);
+        Padding = new(12, 8, 12, 8);
         Margin = new(0, 0, 0, 10);
         Child = _root;
         System.Windows.Documents.Typography.SetNumeralAlignment(_content, W.FontNumeralAlignment.Tabular);
@@ -93,7 +93,7 @@ internal sealed partial class ProviderOverview : C.Border
         {
             var week = MetricsPeriods.Monday(date);
             _weekStart = week == MetricsPeriods.Monday(today) ? null : week;
-            if (_selectedWeekDay is { } selected && MetricsPeriods.Monday(selected) != week) _selectedWeekDay = null;
+            if (_selectedWeekDay is { } selected && MetricsPeriods.Monday(selected) != week) _selectedWeekDay = _expandedWeekModels = null;
         }
         Redraw();
     }
@@ -105,6 +105,7 @@ internal sealed partial class ProviderOverview : C.Border
         var today = _todayDate();
         if (!_dirty && _lastRenderDate == today) return;
         _dirty = false;
+        if (_lastRenderDate != today) _history = null;
         _lastRenderDate = today;
         ClosePicker();
         var focus = (System.Windows.Input.Keyboard.FocusedElement as C.Button)?.Tag as string;
@@ -122,7 +123,7 @@ internal sealed partial class ProviderOverview : C.Border
         var end = SelectedView switch { UsageView.Today => today, UsageView.Calendar => start.AddMonths(1).AddDays(-1), _ => start.AddDays(6) };
         DisplayedPeriod = _history.Read(start, end, today);
 
-        if (SelectedView != UsageView.Today) RenderNavigation(start, end, today);
+        if (SelectedView is UsageView.Week or UsageView.Quotas) Add(PeriodNavigation(start, end, today), 4);
         switch (SelectedView)
         {
             case UsageView.Today: RenderToday(today); break;
@@ -130,7 +131,6 @@ internal sealed partial class ProviderOverview : C.Border
             case UsageView.Quotas: RenderQuotas(start, today); break;
             case UsageView.Calendar: RenderMonth(start, end, today); break;
         }
-        RenderCoverage();
         if (focus is not null && _buttons.TryGetValue(focus, out var target) && target.IsEnabled) target.Focus();
     }
 
@@ -139,21 +139,15 @@ internal sealed partial class ProviderOverview : C.Border
 
     private void RenderToday(DateOnly today)
     {
-        Add(Label(Cap(today.ToString("dddd, d 'de' MMMM", MetricsHistory.Culture)), 11, color: _theme.Muted), 14);
-        var number = new C.StackPanel { Orientation = C.Orientation.Horizontal };
-        number.Children.Add(LargeTotal());
-        var units = Label("tokens", 11, color: _theme.Muted);
-        units.VerticalAlignment = W.VerticalAlignment.Bottom;
-        units.Margin = new(8, 0, 0, 6);
-        number.Children.Add(units);
-        Add(number, 4);
+        Add(Label(Cap(today.ToString("dddd, d 'de' MMMM", MetricsHistory.Culture)), 10.5, color: _theme.Muted), 7);
+        Add(TokenTotal(), 2);
 
         if (Series.Count == 0)
         {
             Add(Label(DisplayedPeriod.HasKnownTotal ? "Sin actividad hoy" : "Sin historial disponible", 10, color: _theme.Muted), 10);
             return;
         }
-        var bar = new C.Grid { Height = 6 };
+        var bar = new C.Grid { Height = 4 };
         for (var i = 0; i < Series.Count; i++)
         {
             var item = Series[i];
@@ -161,56 +155,108 @@ internal sealed partial class ProviderOverview : C.Border
             bar.ColumnDefinitions.Add(new() { Width = new W.GridLength((double)item.Tokens, W.GridUnitType.Star) });
             Put(bar, new C.Border { Background = ProviderBrush(item.Provider), CornerRadius = new(2) }, i * 2);
         }
-        Add(bar, 12);
+        Add(bar, 6);
         var onlyProvider = Series.Count == 1;
         for (var i = 0; i < Series.Count; i++)
         {
             var item = Series[i];
             if (i != 0) Add(Rule(), 0);
-            var expanded = onlyProvider || _expandedProviders.Contains(item.Provider);
-            var row = Columns(W.GridLength.Auto, new(1, W.GridUnitType.Star), W.GridLength.Auto, new(56), new(20));
+            var expanded = _modelExpansion.GetValueOrDefault(item.Provider, onlyProvider);
+            var row = Columns(W.GridLength.Auto, new(1, W.GridUnitType.Star), W.GridLength.Auto, new(45), new(17));
             Put(row, Dot(item.Provider), 0);
-            Put(row, Label(ProviderIds.Name(item.Provider), 12, true), 1);
-            Put(row, Right(MetricsHistory.Number(item.Tokens), 12, true), 2);
-            Put(row, Right(Percent(item.Tokens), 10.5, color: _theme.Muted), 3);
-            if (!onlyProvider) Put(row, Chevron(expanded ? "\uE70E" : "\uE70D"), 4);
-            if (onlyProvider) { row.Height = 33; Add(row, i == 0 ? 4 : 0); }
-            else
+            Put(row, Label(ProviderIds.Name(item.Provider), 11, true), 1);
+            Put(row, Right(MetricsHistory.Number(item.Tokens), 11, true), 2);
+            Put(row, Right(Percent(item.Tokens), 10, color: _theme.Muted), 3);
+            var arrow = Chevron("");
+            Put(row, arrow, 4);
+            var details = new C.Border();
+            var button = ActionButton(row, "provider-" + item.Provider, ProviderIds.Name(item.Provider), null, 23);
+            button.Click += (_, _) =>
             {
-                var button = ActionButton(row, "provider-" + item.Provider,
-                    $"{ProviderIds.Name(item.Provider)} · {MetricsHistory.Number(item.Tokens)} tokens · {Percent(item.Tokens)} · {(expanded ? "Ocultar" : "Mostrar")} modelos",
-                    () => { if (!_expandedProviders.Add(item.Provider)) _expandedProviders.Remove(item.Provider); Redraw(); }, 32);
-                Add(button, i == 0 ? 4 : 0);
+                expanded = !expanded;
+                _modelExpansion[item.Provider] = expanded;
+                UpdateModels();
+            };
+            Add(button, i == 0 ? 2 : 0);
+            Add(details, 0, 4, 4);
+            void UpdateModels()
+            {
+                arrow.Text = expanded ? "\uE70E" : "\uE70D";
+                details.Child = expanded ? ModelList(today, item.Provider) : null;
+                details.Visibility = details.Child is null ? W.Visibility.Collapsed : W.Visibility.Visible;
+                W.Automation.AutomationProperties.SetName(button,
+                    $"{ProviderIds.Name(item.Provider)} · {MetricsHistory.Number(item.Tokens)} tokens · {Percent(item.Tokens)} · {(expanded ? "Ocultar" : "Mostrar")} modelos");
             }
-
-            if (!expanded) continue;
-            var models = new C.StackPanel();
-            foreach (var model in _history!.Models(today, item.Provider))
-                models.Children.Add(Pair(Label(model.Name, 10.5, color: _theme.Muted), Right(MetricsHistory.Number(model.Tokens), 10.5), 19));
-            if (models.Children.Count > 0) Add(new C.Border { Child = models,
-                Background = UiTheme.Brush(_theme.Text, 12), CornerRadius = new(6), Padding = new(11, 3, 14, 5) }, 0, 8, 15);
+            UpdateModels();
         }
+    }
+
+    private C.Border? ModelList(DateOnly date, string provider)
+    {
+        var models = _history!.Models(date, provider);
+        if (models.Count == 0) return null;
+        var rows = new C.StackPanel();
+        foreach (var model in models)
+        {
+            var count = Right(MetricsHistory.Number(model.Tokens), 10);
+            count.Margin = new(8, 0, 0, 0);
+            rows.Children.Add(Pair(Label(model.Name, 10, color: _theme.Muted), count, 16));
+        }
+        return new C.Border { Child = rows, BorderBrush = ProviderBrush(provider),
+            BorderThickness = new(2, 0, 0, 0), Padding = new(8, 0, 0, 0) };
     }
 
     private void RenderWeek(DateOnly start, DateOnly today)
     {
-        Add(LargeTotal(), 11);
-        Add(Pair(Label("Tokens de la semana", 10.5, color: _theme.Muted), CurrentPeriodButton(start != MetricsPeriods.Monday(today), today, "Esta semana"), 16), 2);
+        Add(Pair(TokenTotal(), CurrentPeriodButton(start != MetricsPeriods.Monday(today), today, "Esta semana"), 23), 2);
         var days = DisplayedPeriod.Days.ToDictionary(d => d.Date);
         var providerOrder = Series.Select(s => s.Provider).ToArray();
         var chart = new C.Primitives.UniformGrid { Columns = 7, Rows = 1 };
         var max = Math.Max(1, days.Values.Select(d => d.Total).DefaultIfEmpty(0).Max());
-        var dateLabel = Label("", 11, true);
-        var tokenLabel = Right("", 11, true);
+        var dateLabel = Label("", 10, color: _theme.Muted);
+        var tokenLabel = Right("", 10, true);
+        tokenLabel.Margin = new(4, 0, 0, 0);
         var choices = new Dictionary<DateOnly, (C.Button Button, C.TextBlock Caption)>();
+        var key = Series.Count > 0 ? ProviderKey() : null;
+        var dayRow = Pair(dateLabel, tokenLabel, 17);
+        var arrow = Chevron("\uE70D", 9);
+        var caption = Pair(dayRow, arrow, 17);
+        dayRow.Margin = new(0, 0, 7, 0);
+        var modelDetails = new C.StackPanel();
+        var dayButton = ActionButton(caption, "week-models", "Modelos del día", null, 17);
+        dayButton.Click += (_, _) =>
+        {
+            _expandedWeekModels = _expandedWeekModels == _selectedWeekDay ? null : _selectedWeekDay;
+            UpdateDetail();
+        };
         void UpdateDetail()
         {
             var selected = _selectedWeekDay is { } date ? days.GetValueOrDefault(date) : null;
+            if (key is not null) key.Visibility = selected is null ? W.Visibility.Visible : W.Visibility.Collapsed;
+            dayButton.Visibility = selected is null ? W.Visibility.Collapsed : W.Visibility.Visible;
+            modelDetails.Children.Clear();
             dateLabel.Text = selected is null ? "" : Cap(selected.Date.ToString("dddd d", MetricsHistory.Culture));
             tokenLabel.Text = selected is null ? "" : DayAmount(selected);
+            if (selected is null) return;
+            var expanded = selected.Date == _expandedWeekModels;
+            dayButton.IsEnabled = selected.Total > 0;
+            arrow.Visibility = dayButton.IsEnabled ? W.Visibility.Visible : W.Visibility.Collapsed;
+            arrow.Text = expanded ? "\uE70E" : "\uE70D";
+            W.Automation.AutomationProperties.SetName(dayButton, DayName(selected.Date, selected) +
+                (dayButton.IsEnabled ? expanded ? " · Ocultar modelos" : " · Mostrar modelos" : ""));
+            if (!expanded) return;
+            foreach (var series in selected.Series)
+            {
+                if (ModelList(selected.Date, series.Provider) is not { } models) continue;
+                var heading = Label(ProviderIds.Name(series.Provider), 10, true);
+                heading.Margin = new(0, 3, 0, 1);
+                modelDetails.Children.Add(heading);
+                modelDetails.Children.Add(models);
+            }
         }
         void SelectDay(DateOnly date)
         {
+            _expandedWeekModels = null;
             var previous = _selectedWeekDay;
             _selectedWeekDay = previous == date ? null : date;
             if (previous is { } old && choices.TryGetValue(old, out var deselected))
@@ -230,11 +276,11 @@ internal sealed partial class ProviderOverview : C.Border
             var bar = new C.StackPanel { VerticalAlignment = W.VerticalAlignment.Bottom, Width = 27 };
             foreach (var provider in providerOrder)
                 if (day?.Series.FirstOrDefault(s => s.Provider == provider) is { } series)
-                    bar.Children.Add(new C.Border { Height = 68 * (double)(series.Tokens / max), Background = ProviderBrush(provider) });
+                    bar.Children.Add(new C.Border { Height = 35 * (double)(series.Tokens / max), Background = ProviderBrush(provider) });
             if (day is not null && day.Total == 0)
                 bar.Children.Add(new C.Border { Height = day.Covered ? 2 : 1, Background = UiTheme.Brush(_theme.Muted, day.Covered ? (byte)85 : (byte)38) });
             var cell = new C.StackPanel();
-            var band = new C.Grid { Height = 79 };
+            var band = new C.Grid { Height = 37 };
             band.Children.Add(bar);
             cell.Children.Add(band);
             cell.Children.Add(Rule());
@@ -243,7 +289,7 @@ internal sealed partial class ProviderOverview : C.Border
             label.Margin = new(0, 4, 0, 0);
             cell.Children.Add(label);
             var button = ActionButton(cell, "week-" + date.DayNumber, DayName(date, day),
-                () => SelectDay(date), 102);
+                () => SelectDay(date), 56);
             button.Margin = new(1, 0, 1, 0);
             button.IsEnabled = day is not null;
             button.BorderThickness = new(1);
@@ -251,10 +297,13 @@ internal sealed partial class ProviderOverview : C.Border
             choices.Add(date, (button, label));
             chart.Children.Add(button);
         }
-        Add(chart, 9);
+        Add(chart, 2);
         UpdateDetail();
-        Add(Pair(dateLabel, tokenLabel, 20), 9);
-        if (Series.Count > 0) Add(ProviderKey(), 7);
+        var footer = new C.Grid { MinHeight = 17 };
+        if (key is not null) footer.Children.Add(key);
+        footer.Children.Add(dayButton);
+        Add(footer, 4);
+        Add(modelDetails, 0);
     }
 
     private void StyleWeekDay(C.Button button, C.TextBlock caption, bool selected)
@@ -267,39 +316,39 @@ internal sealed partial class ProviderOverview : C.Border
 
     private void RenderQuotas(DateOnly start, DateOnly today)
     {
-        Add(Label("Reparto de tokens", 12, true), 12);
-        var body = Columns(new(120), new(1, W.GridUnitType.Star));
-        body.MinHeight = 130;
+        var body = Columns(new(112), new(1, W.GridUnitType.Star));
         Put(body, Ring(), 0);
-        var legend = new C.StackPanel { VerticalAlignment = W.VerticalAlignment.Center, Margin = new(12, 0, 0, 0) };
+        var legend = new C.StackPanel { VerticalAlignment = W.VerticalAlignment.Center, Margin = new(6, 0, 0, 0) };
+        legend.Children.Add(Label("Reparto de tokens", 10, color: _theme.Muted));
         foreach (var item in Series)
         {
             var line = Columns(W.GridLength.Auto, new(1, W.GridUnitType.Star), W.GridLength.Auto);
             Put(line, Dot(item.Provider), 0);
             var provider = new C.StackPanel();
-            provider.Children.Add(Label(ProviderIds.Name(item.Provider), 12, true));
+            provider.Children.Add(Label(ProviderIds.Name(item.Provider), 11, true));
             provider.Children.Add(Label(MetricsHistory.Number(item.Tokens) + " tokens", 10, color: _theme.Muted));
             Put(line, provider, 1);
             var percent = Right(Percent(item.Tokens), 11, true);
             percent.VerticalAlignment = W.VerticalAlignment.Top;
             Put(line, percent, 2);
-            line.Margin = new(0, 4, 0, 5);
+            line.Margin = new(0, 1, 0, 2);
             legend.Children.Add(line);
         }
         if (Series.Count == 0) legend.Children.Add(Label(DisplayedPeriod.HasKnownTotal ? "Sin actividad esta semana" : "Sin historial disponible", 10, color: _theme.Muted));
         Put(body, legend, 1);
-        Add(body, 8);
-        Add(Rule(), 8);
-        var current = start == MetricsPeriods.Monday(today);
-        Add(Pair(Label(current ? "Semana actual" : "Semana anterior", 10.5, color: _theme.Muted),
-            CurrentPeriodButton(!current, today, "Esta semana"), 19), 5);
+        Add(body, 6);
+        if (CurrentPeriodButton(start != MetricsPeriods.Monday(today), today, "Esta semana") is { } current)
+        {
+            current.HorizontalAlignment = W.HorizontalAlignment.Right;
+            Add(current, 1);
+        }
     }
 
-    private C.Canvas Ring()
+    private C.Grid Ring()
     {
-        const double center = 50, radius = 44, stroke = 12;
-        var ring = new C.Canvas { Width = 100, Height = 100, VerticalAlignment = W.VerticalAlignment.Center, Margin = new(5, 0, 0, 0), HorizontalAlignment = W.HorizontalAlignment.Left };
-        ring.Children.Add(new S.Ellipse { Width = 100, Height = 100, StrokeThickness = stroke, Stroke = UiTheme.Brush(_theme.Text, 25) });
+        const double diameter = 104, stroke = 11, center = diameter / 2, radius = center - stroke / 2;
+        var ring = new C.Grid { Width = diameter, Height = diameter, VerticalAlignment = W.VerticalAlignment.Center };
+        ring.Children.Add(new S.Ellipse { StrokeThickness = stroke, Stroke = UiTheme.Brush(_theme.Text, 25) });
         var start = -Math.PI / 2;
         foreach (var item in Series)
         {
@@ -307,7 +356,7 @@ internal sealed partial class ProviderOverview : C.Border
             var fraction = (double)(item.Tokens / DisplayedPeriod.Total);
             var end = start + fraction * Math.Tau;
             if (Series.Count == 1)
-                ring.Children.Add(new S.Ellipse { Width = 100, Height = 100, StrokeThickness = stroke, Stroke = brush });
+                ring.Children.Add(new S.Ellipse { StrokeThickness = stroke, Stroke = brush });
             else
             {
                 var geometry = new M.StreamGeometry();
@@ -323,17 +372,27 @@ internal sealed partial class ProviderOverview : C.Border
             }
             start = end;
         }
-        var label = new C.StackPanel { Width = 80, IsHitTestVisible = false };
-        var text = Label(TotalText, 17, true);
+        var (amount, unit) = DisplayedPeriod.HasKnownTotal ? RingAmount(DisplayedPeriod.Total) : ("—", "tokens");
+        var label = new C.StackPanel { VerticalAlignment = W.VerticalAlignment.Center, HorizontalAlignment = W.HorizontalAlignment.Center };
+        var text = Label(amount, 17, true);
         text.TextAlignment = W.TextAlignment.Center;
-        var unit = Label("tokens", 9.5, color: _theme.Muted);
-        unit.TextAlignment = W.TextAlignment.Center;
-        label.Children.Add(new C.Viewbox { Child = text, Width = 76, Height = 23, StretchDirection = C.StretchDirection.DownOnly });
-        label.Children.Add(unit);
-        C.Canvas.SetTop(label, 34); C.Canvas.SetLeft(label, 10);
-        ring.Children.Add(label);
+        var suffix = Label(unit, 10, color: _theme.Muted);
+        suffix.TextAlignment = W.TextAlignment.Center;
+        label.Children.Add(text);
+        label.Children.Add(suffix);
+        ring.Children.Add(new C.Viewbox { Child = label, Width = 72, Height = 42, StretchDirection = C.StretchDirection.DownOnly });
         W.Automation.AutomationProperties.SetName(ring, DisplayedPeriod.HasKnownTotal ? TotalText + " tokens" : "Sin historial disponible");
         return ring;
+    }
+
+    internal static (string Amount, string Unit) RingAmount(decimal total)
+    {
+        if (total < 1_000) return (MetricsHistory.Number(total), "tokens");
+        var divisor = total < 999_500 ? 1_000m : 1_000_000m;
+        var scaled = total / divisor;
+        var rounded = Math.Round(scaled, scaled < 10 ? 1 : 0, MidpointRounding.AwayFromZero);
+        return (rounded.ToString("#,0.#", MetricsHistory.Culture),
+            divisor == 1_000 ? "mil" : rounded == 1 ? "millón" : "millones");
     }
 
     private C.Primitives.UniformGrid ProviderKey()
@@ -349,23 +408,18 @@ internal sealed partial class ProviderOverview : C.Border
         return legend;
     }
 
-    private void RenderCoverage()
+    private C.StackPanel TokenTotal()
     {
-        var period = DisplayedPeriod;
-        if (!period.Partial) return;
-        var details = new List<string>();
-        if (period.CatchingUp) details.Add("Indexando historial…");
-        else if (period.HasKnownTotal && period.MissingProviders.Count > 0) details.Add("Historial parcial");
-        if (period.Clipped) details.Add("Periodo recortado por la retención");
-        if (period.MissingProviders.Count > 0) details.Add("Cobertura incompleta: " + string.Join(", ", period.MissingProviders.Select(ProviderIds.Name)));
-        if (details.Count == 0) details.Add("Historial parcial");
-        var label = Label(string.Join(" · ", details), 9.5, color: _theme.Muted);
-        label.TextWrapping = W.TextWrapping.Wrap;
-        Add(label, 7);
+        var number = new C.StackPanel { Orientation = C.Orientation.Horizontal };
+        number.Children.Add(Label(TotalText, 17, true));
+        var units = Label("tokens", 10, color: _theme.Muted);
+        units.VerticalAlignment = W.VerticalAlignment.Bottom;
+        units.Margin = new(5, 0, 0, 2);
+        number.Children.Add(units);
+        return number;
     }
 
     private string TotalText => DisplayedPeriod.HasKnownTotal ? MetricsHistory.Number(DisplayedPeriod.Total) : "—";
-    private C.TextBlock LargeTotal() => Label(TotalText, 26, true);
     private static string Cap(string text) => char.ToUpper(text[0], MetricsHistory.Culture) + text[1..];
     private string Percent(decimal amount) => (DisplayedPeriod.Total == 0 ? "0" : (amount * 100 / DisplayedPeriod.Total).ToString("0", MetricsHistory.Culture)) + " %";
     private static string DayAmount(MetricsDay day) => day.Total > 0 || day.Covered ? MetricsHistory.Number(day.Total) + " tokens" : "Sin cobertura";
@@ -407,12 +461,12 @@ internal sealed partial class ProviderOverview : C.Border
         if (right is not null) Put(row, right, 1);
         return row;
     }
-    private C.Button ActionButton(object content, string key, string name, Action action, double minHeight)
+    private C.Button ActionButton(object content, string key, string name, Action? action, double minHeight)
     {
         var button = new C.Button { Content = content, MinHeight = minHeight, Padding = new(0), Tag = key,
             HorizontalContentAlignment = W.HorizontalAlignment.Stretch, VerticalContentAlignment = W.VerticalAlignment.Center, Background = M.Brushes.Transparent };
         W.Automation.AutomationProperties.SetName(button, name);
-        button.Click += (_, _) => { if (button.IsEnabled) action(); };
+        if (action is not null) button.Click += (_, _) => { if (button.IsEnabled) action(); };
         _buttons.Add(key, button);
         return button;
     }

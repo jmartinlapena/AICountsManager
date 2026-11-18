@@ -32,7 +32,8 @@ internal static partial class Program
                     && ((M.SolidColorBrush)label.Foreground).Color == theme.Muted, "Only the impending expiry should use the warning color.");
             }
             view.Update(new(0, [], now), theme, now);
-            Check(view.Visibility == W.Visibility.Collapsed && view.EstimatedHeight == 0, "Zero resets occupied a line.");
+            view.Measure(new W.Size(320, double.PositiveInfinity));
+            Check(view.Visibility == W.Visibility.Collapsed && view.DesiredSize.Height == 0, "Zero resets occupied a line.");
             view.Update(new(1, [new("full", "Reset", "", 1, null)], now), theme, now);
             Check(!new D.TextRange(label.ContentStart, label.ContentEnd).Text.Contains("Caduca pronto"), "No expiry gained an invented warning.");
             view.Update(new(3, [new("full", "Reset", "", 1, now.AddDays(-1)), new("full", "Reset", "", 1, now.AddDays(3).AddHours(4)),

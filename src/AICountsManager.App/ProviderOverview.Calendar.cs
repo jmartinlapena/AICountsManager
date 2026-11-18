@@ -7,28 +7,29 @@ namespace AICountsManager;
 
 internal sealed partial class ProviderOverview
 {
-    private void RenderNavigation(DateOnly start, DateOnly end, DateOnly today)
+    private C.Border PeriodNavigation(DateOnly start, DateOnly end, DateOnly today)
     {
         var monthly = SelectedView == UsageView.Calendar;
         var cutoff = MetricsPeriods.Cutoff(today);
         var previousDate = monthly ? start.AddMonths(-1) : start.AddDays(-7);
         var nextDate = monthly ? start.AddMonths(1) : start.AddDays(7);
         var periodName = monthly ? Cap(start.ToString("MMMM yyyy", MetricsHistory.Culture)) : WeekRange(start, end);
-        var row = Columns(new(28), new(1, W.GridUnitType.Star), new(28));
-        var previous = ActionButton(CenteredIcon("\uE76B"), "previous", monthly ? "Mes anterior" : "Semana anterior", () => ChoosePeriod(previousDate), 26);
+        var arrowWidth = monthly ? 17 : 26;
+        var row = Columns(new(arrowWidth), new(1, W.GridUnitType.Star), new(arrowWidth));
+        var previous = ActionButton(CenteredIcon("\uE76B"), "previous", monthly ? "Mes anterior" : "Semana anterior", () => ChoosePeriod(previousDate), 23);
         previous.IsEnabled = start.AddDays(-1) >= cutoff;
-        var next = ActionButton(CenteredIcon("\uE76C"), "next", monthly ? "Mes siguiente" : "Semana siguiente", () => ChoosePeriod(nextDate), 26);
+        var next = ActionButton(CenteredIcon("\uE76C"), "next", monthly ? "Mes siguiente" : "Semana siguiente", () => ChoosePeriod(nextDate), 23);
         next.IsEnabled = nextDate <= today;
         var title = new C.StackPanel { Orientation = C.Orientation.Horizontal, HorizontalAlignment = W.HorizontalAlignment.Center };
-        title.Children.Add(Chevron("\uE787", 11));
-        var caption = Label(periodName, 11.5, true);
-        caption.Margin = new(8, 0, 10, 0);
+        if (!monthly) title.Children.Add(Chevron("\uE787", 10));
+        var caption = Label(monthly ? Cap(start.ToString("MMM yyyy", MetricsHistory.Culture)) : periodName, monthly ? 10 : 11, true);
+        caption.Margin = new(monthly ? 0 : 6, 0, monthly ? 3 : 6, 0);
         title.Children.Add(caption);
         title.Children.Add(Chevron("\uE70D", 9));
         var picker = ActionButton(title, "picker", (monthly ? "Elegir mes · " : "Elegir semana · ") + periodName,
-            () => OpenPicker(_buttons["picker"], start, cutoff, today, monthly), 26);
+            () => OpenPicker(_buttons["picker"], start, cutoff, today, monthly), 23);
         Put(row, previous, 0); Put(row, picker, 1); Put(row, next, 2);
-        Add(new C.Border { Child = row, Background = UiTheme.Brush(_theme.Text, 13), CornerRadius = new(7) }, 10);
+        return new C.Border { Child = row, Background = UiTheme.Brush(_theme.Text, 13), CornerRadius = new(7) };
     }
 
     private void OpenPicker(C.Button anchor, DateOnly start, DateOnly cutoff, DateOnly today, bool monthly)
@@ -167,23 +168,29 @@ internal sealed partial class ProviderOverview
 
     private void RenderMonth(DateOnly start, DateOnly end, DateOnly today)
     {
-        Add(LargeTotal(), 11);
-        Add(Label(start == MetricsPeriods.Month(today) ? "Tokens registrados este mes" : "Tokens registrados en el mes", 10.5, color: _theme.Muted), 2);
         var days = DisplayedPeriod.Days.ToDictionary(day => day.Date);
-        Add(CalendarWeekdays(), 11);
+        var layout = Columns(new(7, W.GridUnitType.Star), new(10), new(5, W.GridUnitType.Star));
+        var calendar = new C.StackPanel();
+        Put(layout, calendar, 0);
+        calendar.Children.Add(CalendarWeekdays());
+        var summary = new C.StackPanel { VerticalAlignment = W.VerticalAlignment.Center };
+        Put(layout, summary, 2);
+        var navigation = PeriodNavigation(start, end, today);
+        navigation.Margin = new(0, 0, 0, 4);
+        summary.Children.Add(navigation);
 
         var cells = new C.Primitives.UniformGrid { Columns = 7, FirstColumn = (start.DayNumber - MetricsPeriods.Monday(start).DayNumber), Margin = new(0) };
         foreach (var date in MetricsPeriods.Days(start, end))
         {
             var day = days.GetValueOrDefault(date);
-            var level = MetricsHistory.Heat(day?.Total ?? 0);
+            var level = _history!.Heat(day?.Total ?? 0);
             var enabled = day is { Total: > 0 };
             var current = date == today;
             var selected = date == _selectedMonthDay && enabled;
             var foreground = level == 4 ? HeatText() : day is { Total: 0, Covered: false } ? _theme.Muted : _theme.Text;
             var plate = new C.Border
             {
-                Height = 20, CornerRadius = new(4), Background = HeatBrush(level),
+                Height = 17, CornerRadius = new(4), Background = HeatBrush(level),
                 BorderThickness = new(selected ? 2 : current ? 1 : 0),
                 BorderBrush = selected || current ? UiTheme.Brush(foreground) : null,
                 Opacity = day is null ? .39 : 1,
@@ -194,18 +201,22 @@ internal sealed partial class ProviderOverview
             if (enabled)
             {
                 var button = ActionButton(plate, "month-" + date.DayNumber, DayName(date, day),
-                    () => { _selectedMonthDay = _selectedMonthDay == date ? null : date; Redraw(); }, 20);
-                button.Margin = new(2, 1.5, 2, 1.5);
+                    () => { _selectedMonthDay = _selectedMonthDay == date ? null : date; Redraw(); }, 17);
+                button.Margin = new(1, 1, 1, 0);
                 cells.Children.Add(button);
             }
             else
             {
-                plate.Margin = new(2, 1.5, 2, 1.5);
+                plate.Margin = new(1, 1, 1, 0);
                 W.Automation.AutomationProperties.SetName(plate, DayName(date, day));
                 cells.Children.Add(plate);
             }
         }
-        Add(cells, 5);
+        calendar.Children.Add(cells);
+        var amount = Label(TotalText, 16, true);
+        summary.Children.Add(new C.Viewbox { Child = amount, Height = 25, StretchDirection = C.StretchDirection.DownOnly,
+            HorizontalAlignment = W.HorizontalAlignment.Left, MaxWidth = 120 });
+        summary.Children.Add(Label("tokens del mes", 10, color: _theme.Muted));
 
         var scale = new C.StackPanel { Orientation = C.Orientation.Horizontal };
         var less = Label("Menos", 9.5, color: _theme.Muted);
@@ -216,16 +227,18 @@ internal sealed partial class ProviderOverview
         scale.Children.Add(Label("Más", 9.5, color: _theme.Muted));
         var ranking = days.Values.Where(d => d.Total > 0).OrderByDescending(d => d.Total).ThenBy(d => d.Date).Take(3).ToArray();
         var activeDays = days.Values.Count(d => d.Total > 0);
-        Add(Pair(scale, Right(DisplayedPeriod.HasKnownTotal ? (activeDays == 1 ? "1 día con actividad" : $"{activeDays} días con actividad") : "Sin cobertura", 10, color: _theme.Muted), 17), 10);
-        Add(Rule(), 7);
-        if (ranking.FirstOrDefault() is { } first)
-            Add(Pair(Label("Día de mayor uso", 10.5, color: _theme.Muted),
-                Right($"{first.Date.ToString("d MMM", MetricsHistory.Culture)} · {DayAmount(first)}", 11, true), 20), 7);
+        scale.Margin = new(0, 6, 0, 2);
+        summary.Children.Add(scale);
+        if (DisplayedPeriod.HasKnownTotal)
+            summary.Children.Add(Label(activeDays == 1 ? "1 día con actividad" : $"{activeDays} días con actividad", 10, color: _theme.Muted));
+        Add(layout, 5);
         if (ranking.Length > 0)
         {
-            var title = ranking.Length switch { 1 => "Día de mayor uso", 2 => "2 días de mayor uso", _ => "3 días de mayor uso" };
-            Add(ActionButton(Pair(Label(title, 10.5, true, _theme.Accent), Chevron(_rankingExpanded ? "\uE70E" : "\uE70D", 9), 24),
-                "ranking", title + (_rankingExpanded ? " · Ocultar" : " · Mostrar"), () => { _rankingExpanded = !_rankingExpanded; Redraw(); }, 24), 2);
+            var title = ranking.Length == 1 ? "Día de mayor uso" : $"{ranking.Length} días de mayor uso";
+            var rankingButton = ActionButton(Pair(Label(title, 10, true, _theme.Accent),
+                Chevron(_rankingExpanded ? "\uE70E" : "\uE70D", 8), 20),
+                "ranking", title + (_rankingExpanded ? " · Ocultar" : " · Mostrar"), () => { _rankingExpanded = !_rankingExpanded; Redraw(); }, 20);
+            summary.Children.Add(rankingButton);
             if (_rankingExpanded)
                 foreach (var item in ranking)
                     Add(Pair(Label(Cap(item.Date.ToString("dddd d", MetricsHistory.Culture)), 10, color: _theme.Muted), Right(DayAmount(item), 10), 19), 0, 0, 8);
